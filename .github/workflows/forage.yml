@@ -1,0 +1,90 @@
+name: forage
+# 手動で起動する。巡回して読んだ文章の統計を学習する(生の文章は保存しない)。
+# 止めるには: Actions画面で実行をキャンセル / 新規起動を止めるにはリポジトリ変数 FORAGER_ENABLED を false にする。
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: '巡回する分数(最大330)。まずは10で試運転'
+        default: '10'
+      workers:
+        description: '並列ワーカー数(1〜6)'
+        default: '2'
+permissions:
+  contents: read
+jobs:
+  forage:
+    if: ${{ vars.FORAGER_ENABLED != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [0, 1, 2, 3, 4, 5]
+    env:
+      MINUTES: ${{ inputs.minutes }}
+      WORKERS: ${{ inputs.workers }}
+      WORKER: ${{ matrix.worker }}
+      FORAGER_CONTACT: ${{ vars.FORAGER_CONTACT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy
+      - name: ワーカー数を超える分は何もしない
+        id: gate
+        run: |
+          if [ "$WORKER" -ge "$WORKERS" ]; then echo "skip=1" >> "$GITHUB_OUTPUT"; fi
+      - name: 取り置き文書を取得(学習曲線の測定用)
+        if: steps.gate.outputs.skip != '1'
+        run: python3 heldout_fetch.py
+      - name: 巡回して学習
+        if: steps.gate.outputs.skip != '1'
+        run: |
+          python3 forager.py --contact "${FORAGER_CONTACT:-github-actions-research-prototype}" \
+            --seeds seeds.txt --deny-file deny.txt \
+            --state state.pkl --metrics metrics.jsonl --urls-log urls.log \
+            --time-budget-min "$MINUTES" --seed "$WORKER" \
+            --metrics-sec 600 --ckpt-sec 600 --max-pages-per-group 2500 --quiet
+      - name: 学習結果を測る(取り置き文書・生成・会話ごっこ)
+        if: always() && steps.gate.outputs.skip != '1' && hashFiles('state.pkl') != ''
+        run: python3 probe.py state.pkl --chat | tee probe.txt
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.gate.outputs.skip != '1'
+        with:
+          name: worker-${{ matrix.worker }}
+          path: |
+            state.pkl
+            metrics.jsonl
+            urls.log
+            probe.txt
+          retention-days: 7
+          if-no-files-found: ignore
+  merge:
+    needs: forage
+    if: ${{ always() && vars.FORAGER_ENABLED != 'false' && inputs.workers != '1' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: worker-*
+          path: parts
+      - name: ワーカーの結果を結合して測る
+        run: |
+          python3 heldout_fetch.py
+          python3 merge_states.py merged.pkl parts/worker-*/state.pkl
+          python3 probe.py merged.pkl --chat | tee probe_merged.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: merged
+          path: |
+            merged.pkl
+            probe_merged.txt
+          retention-days: 7
