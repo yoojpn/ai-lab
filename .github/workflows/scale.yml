@@ -23,11 +23,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install numpy pandas pyarrow
+      - run: pip install numpy pandas pyarrow scipy
       - name: コーパス作成
         run: python3 hdc/prep_wikitext.py ${{ matrix.n }} $RUNNER_TEMP/wt.pkl
       - name: 実験(カード)
         working-directory: hdc
+        shell: bash
         run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 ${{ inputs.script }} ${{ matrix.n }} | tee ../out_${{ matrix.n }}.log
       - uses: actions/upload-artifact@v4
         with:
