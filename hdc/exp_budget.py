@@ -49,7 +49,9 @@ def entries(model):
 
 def main():
     N = int(sys.argv[1]) if len(sys.argv) > 1 else 2_000_000
-    nn_ep = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
+    task = sys.argv[2] if len(sys.argv) > 2 else 'all'   # 'c=<しきい値>' / 'nn' / 'all'
+    nn_ep = 1.0 if task in ('nn', 'all') else 0.0
+    cs = [1, 2, 3, 4, 6, 10, 20, 50] if task == 'all' else ([int(task[2:])] if task.startswith('c=') else [])
     K, M, K2 = 200, 1500, 200
     t0 = time.time()
     corp = es.build_corpus()
@@ -121,13 +123,12 @@ def main():
 
     base_bits = None
     rows = []
-    for c in [1, 2, 3, 4, 6, 10, 20, 50]:
+    base_bits = -np.log2(probs_of('A', A, Xte, yte, Ute)).mean()
+    for c in cs:
         pm = {n: (pruned(mod, vys[n], c) if c > 1 else mod) for n, mod, *_ in specs}
         sz = {n: entries(pm[n]) for n in pm}
         pv = {n: probs_of(n, pm[n], Xva, yva, Uva) for n in pm}
         pt = {n: probs_of(n, pm[n], Xte, yte, Ute) for n in pm}
-        if c == 1:
-            base_bits = -np.log2(pt['A']).mean()
 
         def mixbits(names, extra_v=(), extra_t=()):
             Pv = np.array([pv[n] for n in names] + list(extra_v)); Pt = np.array([pt[n] for n in names] + list(extra_t))
@@ -145,6 +146,7 @@ def main():
 
     nn_pt = None
     if nn_ep > 0:
+        # 並列実行時はNNだけを測る(合成は task=all のときだけ)
         import exp_nn2 as nn2
         rng = np.random.default_rng(0)
         net = nn2.Net(rng, np.zeros(V)); net.qprob = np.ones(V) / V
@@ -162,7 +164,7 @@ def main():
         b = -np.log2(nn_pt).mean()
         log('\nNN(固定サイズ) パラメーター%d個=%.1fMB: %.3f bit/語 (%+.1f%%) [%.0fs]' % (npar, npar * 4 / 1e6, b, 100 * (1 - b / base_bits), time.time() - t0))
         # NN + FULL(c=1 と c=10 と c=50)
-        for c in (1, 10, 50):
+        for c in ((1, 10, 50) if task == 'all' else ()):
             pm = {n: (pruned(mod, vys[n], c) if c > 1 else mod) for n, mod, *_ in specs}
             names = ['A', 'B', 'E', 'F', 'C', 'D']
             Pv = np.array([probs_of(n, pm[n], Xva, yva, Uva) for n in names] + [nn_pv])

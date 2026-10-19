@@ -1,0 +1,31 @@
+name: budget
+# 記憶の予算 vs 精度。条件ごとにジョブを分けて並列で走らせる。
+on:
+  workflow_dispatch:
+    inputs:
+      sizes:
+        default: '[1000000,4000000]'
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        n: ${{ fromJSON(inputs.sizes) }}
+        task: ['c=1','c=2','c=3','c=4','c=6','c=10','c=20','c=50','nn']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy
+      - run: python3 hdc/prep_wikitext.py ${{ matrix.n }} $RUNNER_TEMP/wt.pkl
+      - name: 実験
+        working-directory: hdc
+        shell: bash
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_budget.py ${{ matrix.n }} '${{ matrix.task }}' | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: out-${{ matrix.n }}-${{ strategy.job-index }}
+          path: out.log
