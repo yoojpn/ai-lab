@@ -1,0 +1,28 @@
+name: scale
+# 実験: 学習データ量を増やすと、数え上げの階段に対する「空欄つきカード」の得は増えるか。
+# データは WikiText-103(標準の公開データ)を各ジョブで1回ダウンロードするだけ(クロールはしない)。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1000000, 4000000, 16000000]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow
+      - name: コーパス作成
+        run: python3 hdc/prep_wikitext.py ${{ matrix.n }} $RUNNER_TEMP/wt.pkl
+      - name: 実験(カード)
+        working-directory: hdc
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_cards.py ${{ matrix.n }} | tee ../cards_${{ matrix.n }}.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cards-${{ matrix.n }}
+          path: cards_${{ matrix.n }}.log
