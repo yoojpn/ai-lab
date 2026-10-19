@@ -1,0 +1,33 @@
+name: auto
+# 施策(1〜41)の自動試験。施策ごとにジョブを分けて並列で走らせる。
+on:
+  workflow_dispatch:
+    inputs:
+      n:
+        default: '4000000'
+      items:
+        description: '施策番号のJSON配列'
+        default: '["06","07","10","21","25","29","41"]'
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 170
+    strategy:
+      fail-fast: false
+      matrix:
+        item: ${{ fromJSON(inputs.items) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - run: python3 hdc/prep_wikitext.py ${{ inputs.n }} $RUNNER_TEMP/wt.pkl
+      - name: 試験
+        working-directory: hdc
+        shell: bash
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 auto.py ${{ matrix.item }} ${{ inputs.n }} | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: item-${{ matrix.item }}
+          path: out.log
