@@ -3,6 +3,10 @@ name: scale
 # データは WikiText-103(標準の公開データ)を各ジョブで1回ダウンロードするだけ(クロールはしない)。
 on:
   workflow_dispatch:
+    inputs:
+      sizes:
+        description: '訓練語数のJSON配列'
+        default: '[1000000,4000000,16000000]'
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -10,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        n: [1000000, 4000000, 16000000]
+        n: ${{ fromJSON(inputs.sizes) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

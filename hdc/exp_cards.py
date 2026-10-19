@@ -197,7 +197,8 @@ def main():
     cards = {}
     for p in pats:
         c = Card(p, Xtr, ytr, cls, pu)
-        cards[p] = (c, c.probs(Xva, yva), c.probs(Xte, yte))
+        cards[p] = (c.name(), c.probs(Xva, yva), c.probs(Xte, yte))
+        del c
     log('  数え終わり [%.0fs]' % (time.time() - t0))
 
     def greedy(base_v, base_t, extra_v, extra_t, tag, max_cards=8, min_gain=0.0005):
@@ -221,7 +222,7 @@ def main():
                 break
             chosen.append(best[1])
             cur_v.append(cards[best[1]][1]); cur_t.append(cards[best[1]][2]); cur = best[0]
-            log('  [%s] 選んだ型 %d: %-14s 検証での得 %.2f%%' % (tag, len(chosen), cards[best[1]][0].name(), 100 * gain))
+            log('  [%s] 選んだ型 %d: %-14s 検証での得 %.2f%%' % (tag, len(chosen), cards[best[1]][0], 100 * gain))
         return cur_v, cur_t, chosen
 
     log('\n=== 型(カード)を圧縮の基準で選ぶ ===')
