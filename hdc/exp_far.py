@@ -148,6 +148,46 @@ def local_for_windows(docs, mid, pos, y, cls, pu):
     return P, N
 
 
+def build_embeddings(Xtr, ytr, dim=64):
+    """共起(前後2語以内)→ PPMI → SVD で、単語の座標を作る(GPU不要)"""
+    from scipy.sparse.linalg import svds
+    C = np.zeros(V * V, np.float64)
+    for a, b in ((Xtr[:, HIST - 1], ytr), (ytr, Xtr[:, HIST - 1]), (Xtr[:, HIST - 2], ytr), (ytr, Xtr[:, HIST - 2])):
+        C += np.bincount(a * V + b, minlength=V * V)
+    C = C.reshape(V, V)
+    rs = C.sum(1) + 1e-9; cs = C.sum(0) ** 0.75 + 1e-9
+    tot = C.sum()
+    with np.errstate(divide='ignore', invalid='ignore'):
+        pmi = np.log(C * cs.sum() / (rs[:, None] * cs[None, :]))
+    pmi = np.where(np.isfinite(pmi), np.maximum(pmi, 0), 0).astype(np.float32)
+    rng = np.random.default_rng(0)
+    Y = pmi @ rng.standard_normal((V, dim + 20)).astype(np.float32)
+    for _ in range(4):
+        Q, _r = np.linalg.qr(Y)
+        Q, _r = np.linalg.qr(pmi @ (pmi.T @ Q))
+        Y = Q
+    Q, _r = np.linalg.qr(Y)
+    Ub, S, _vt = np.linalg.svd(Q.T @ pmi, full_matrices=False)
+    U, S = (Q @ Ub)[:, :dim], S[:dim]
+    E = U * np.sqrt(S)[None, :]
+    E /= np.linalg.norm(E, axis=1, keepdims=True) + 1e-9
+    return E.astype(np.float32), rs
+
+
+def kmeans(E, K, w, iters=20, seed=0):
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(len(E), K, replace=False)
+    Cn = E[idx].copy()
+    for _ in range(iters):
+        lab = (E @ Cn.T).argmax(1)
+        for k in range(K):
+            m = lab == k
+            if m.any():
+                v = (E[m] * w[m, None]).sum(0)
+                Cn[k] = v / (np.linalg.norm(v) + 1e-9)
+    return (E @ Cn.T).argmax(1).astype(np.int64)
+
+
 def farcache_probs(mods, mid, pos, y, W, pu):
     n = len(y)
     out = np.empty(n)
@@ -279,6 +319,39 @@ def main():
         evaluate2(bb + [lp_va[nm]], bt + [lp_te[nm]], '  + %s のみ' % nm)
     r1 = evaluate2(bb + [lp_va[nm] for nm in names], bt + [lp_te[nm] for nm in names], '  + 6種すべて')
     log('  → 索引引きによる追加の改善 %.2f ポイント' % (100 * (r0 - r1) / base_bits))
+
+    # ---- 機械が作った座標でグループ分け(3段階の粗さ)し、学びを似た単語に広げる
+    t1 = time.time()
+    Emb, rowsum = build_embeddings(Xtr, ytr)
+    wts = np.sqrt(rowsum / rowsum.sum() * V)
+    log('単語の座標(64次元)を共起のSVDで作成 [%.0fs]' % (time.time() - t1))
+    ev_names, ev_va, ev_te = [], [], []
+    for Kc in (60, 300, 1000):
+        cl = kmeans(Emb, Kc, wts)
+        Ea = L.NG2(cl[w3(Xtr)], ytr, Kc, V)
+        Xfc = lambda X: np.stack([cl[X[:, HIST - 3]], cl[X[:, HIST - 2]], X[:, HIST - 1]], axis=1)
+        Fa = L.NG2(Xfc(Xtr), ytr, max(Kc, V), V)
+        ev_names += ['座標群K=%d(群→語)' % Kc, '座標群K=%d(群,群,語)' % Kc]
+        ev_va += [Ea.probs(cl[w3(Xva)], yva), Fa.probs(Xfc(Xva), yva)]
+        ev_te += [Ea.probs(cl[w3(Xte)], yte), Fa.probs(Xfc(Xte), yte)]
+    ex = []
+    for wd in ('king', 'france', 'run', 'he', 'blue'):
+        if wd in vocab:
+            sim = Emb @ Emb[vocab[wd]]
+            inv = {i: w for w, i in vocab.items()}
+            nn = [inv[i] for i in np.argsort(-sim)[1:7] if i in inv]
+            ex.append('%s→%s' % (wd, ','.join(nn)))
+    log('座標が近い単語の例: ' + ' / '.join(ex))
+    log('座標群の部品を計算 [%.0fs]' % (time.time() - t1))
+    for nm, v_, t_ in zip(ev_names, ev_va, ev_te):
+        log('  単独 %-26s %.3f bit/語' % (nm, -np.log2(t_).mean()))
+    bbl = bb + [lp_va[nm] for nm in names]; btl = bt + [lp_te[nm] for nm in names]
+    log('\n=== 座標群の部品を足す(これまでの全部品の上に) ===')
+    r2 = evaluate2(bbl, btl, '基準(はしご+繰り返し+キャッシュ+遠い+索引引き6種)')
+    for Kc_i, Kc in enumerate((60, 300, 1000)):
+        evaluate2(bbl + ev_va[2 * Kc_i:2 * Kc_i + 2], btl + ev_te[2 * Kc_i:2 * Kc_i + 2], '  + 座標群 K=%d' % Kc)
+    r3 = evaluate2(bbl + ev_va, btl + ev_te, '  + 座標群 3段階すべて')
+    log('  → 座標群による追加の改善 %.2f ポイント / 全部品の合計 改善 %.2f%%' % (100 * (r2 - r3) / base_bits, 100 * (1 - r3 / base_bits)))
 
     b5 = evaluate(base_va + [cp_va, ca_va, nb_va], base_te + [cp_te, ca_te, nb_te], '  + 話題予測(積み上げ)')
     b6 = evaluate(base_va + [cp_va, ca_va, fc_va, nb_va], base_te + [cp_te, ca_te, fc_te, nb_te], '  + 遠いキャッシュ + 話題予測(積み上げ)')
