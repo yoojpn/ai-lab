@@ -192,7 +192,7 @@ def i02_knn(ctx):
     rv = forward_all(net, ctx, 'va')
     M = min(len(ctx.Xtr), 1_000_000)
     with torch.no_grad():
-        keys = torch.cat([hidden(net, torch.from_numpy(ctx.Xtr[i:i + 8192])) for i in range(0, M, 8192)])
+        keys = torch.cat([hidden(net, torch.from_numpy(ctx.Xtr[i:min(i + 8192, M)])) for i in range(0, M, 8192)])
         vals = torch.from_numpy(ctx.ytr[:M])
         def q(X): return torch.cat([hidden(net, torch.from_numpy(X[i:i + 8192])) for i in range(0, len(X), 8192)])
         Qv, Qt = q(ctx.Xva), q(ctx.Xte)
