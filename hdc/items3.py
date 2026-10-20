@@ -365,9 +365,9 @@ def i64_blimp(ctx):
         import subprocess, sys
         subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'datasets'], check=True)
         from datasets import load_dataset
-        confs = ['anaphor_gender_agreement', 'determiner_noun_agreement_1', 'regular_plural_subject_verb_agreement_1',
-                 'irregular_past_participle_verbs', 'existential_there_quantifiers_1', 'sentential_negation_npi_licensor_present_1',
-                 'principle_A_case_1', 'adjunct_island']
+        from datasets import get_dataset_config_names
+        allc = get_dataset_config_names('nyu-mll/blimp')
+        confs = allc[::5][:13]
         data = {c: load_dataset('nyu-mll/blimp', c, split='train') for c in confs}
     except Exception as e:
         return dict(unavailable=str(e)[:200])
