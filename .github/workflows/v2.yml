@@ -10,11 +10,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {n: 4000000, v: base}
-          - {n: 4000000, v: ppmi}
-          - {n: 4000000, v: ppmi_head}
-          - {n: 4000000, v: full}
-          - {n: 16000000, v: full}
+          - {n: 4000000, v: base, s: 1}
+          - {n: 4000000, v: full, s: 1}
+          - {n: 16000000, v: base, s: 1}
+          - {n: 16000000, v: full, s: 1}
+          - {n: 4000000, v: base, s: 2}
+          - {n: 4000000, v: full, s: 2}
+          - {n: 16000000, v: base, s: 2}
+          - {n: 16000000, v: full, s: 2}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,8 +28,8 @@ jobs:
       - name: 測定
         working-directory: hdc
         shell: bash
-        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_v2.py ${{ matrix.n }} ${{ matrix.v }} | tee ../out.log
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_v2.py ${{ matrix.n }} ${{ matrix.v }} ${{ matrix.s }} | tee ../out.log
       - uses: actions/upload-artifact@v4
         with:
-          name: v2-${{ matrix.n }}-${{ matrix.v }}
+          name: v2-${{ matrix.s }}-${{ matrix.n }}-${{ matrix.v }}
           path: out.log

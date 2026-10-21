@@ -60,7 +60,8 @@ def quantize8(net):
 
 
 def main():
-    N = int(sys.argv[1]); variant = sys.argv[2]
+    N = int(sys.argv[1]); variant = sys.argv[2]; size = int(sys.argv[3]) if len(sys.argv) > 3 else 1
+    d, nl, dff, nh = {1: (64, 2, 256, 4), 2: (128, 3, 512, 4), 3: (192, 4, 768, 6)}[size]
     t0 = time.time(); torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(0)
     ctx = lab.load(N)
     log('データ準備 [%.0fs]' % (time.time() - t0))
@@ -85,9 +86,9 @@ def main():
     r = A.probs(w3(ctx.Xte), ctx.yte); r = r[0] if isinstance(r, tuple) else r
     base4 = bits(r)
     # モデル
-    E0 = items.ppmi_embeddings(ctx) if variant != 'base' else None
+    E0 = items.ppmi_embeddings(ctx, d) if variant != 'base' else None
     head = variant in ('ppmi_head', 'full')
-    net = TF(E0, head)
+    net = TF(E0, head, d, nl, dff, nh)
     opt = torch.optim.Adam(net.parameters(), lr=2e-3)
     X = torch.from_numpy(ctx.Xtr); y = torch.from_numpy(ctx.ytr)
     Hd = torch.from_numpy(heads(ctx, 'tr')) if head else None
@@ -104,8 +105,9 @@ def main():
     pv, pt = probs_of(net, ctx, 'va', head), probs_of(net, ctx, 'te', head)
     w = L.em(np.array([pv] + loc_va)); mix = bits((w[:, None] * np.array([pt] + loc_te)).sum(0))
     nn = bits(pt)
-    log('variant=%s N=%d: NN単独 %.3f (4-gram比 %+.1f%%) | NN+文書内の索引 %.3f (%+.1f%%) | 4-gram %.3f | パラメーター%d 記憶%.1fMB 1語の積和%.2fM [%.0fs]' % (
-        variant, N, nn, 100 * (1 - nn / base4), mix, 100 * (1 - mix / base4), base4, params, mb, net.macs() / 1e6, time.time() - t0))
+    trainmacs = 3.0 * net.macs() * steps * 512
+    log('size=%d variant=%s N=%d: NN単独 %.3f (4-gram比 %+.1f%%) | NN+文書内の索引 %.3f (%+.1f%%) | 4-gram %.3f | パラメーター%d 記憶%.1fMB 1語の積和%.2fM 学習の総積和%.3e [%.0fs]' % (
+        size, variant, N, nn, 100 * (1 - nn / base4), mix, 100 * (1 - mix / base4), base4, params, mb, net.macs() / 1e6, trainmacs, time.time() - t0))
 
 
 if __name__ == '__main__':
