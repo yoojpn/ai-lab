@@ -147,7 +147,7 @@ def sleep_measured(solved_progs, shelf, pool, procs, add_n=3, ncand=24, sub=240,
         return sum(ok for _, ok, _ in solve_all(subset, sh, budget, procs))
     base = score(shelf); new = []
     for _ in range(add_n):
-        best, bg = base, None
+        best, bg = score(shelf), None
         for g in cands:
             if g in new or g in shelf:
                 continue
@@ -156,6 +156,12 @@ def sleep_measured(solved_progs, shelf, pool, procs, add_n=3, ncand=24, sub=240,
                 best, bg = sc, g
         if bg is None:
             break
+        # 別の課題(選ぶのに使っていない)で確かめて、良くならなければ取り消す
+        val = pool[sub:2 * sub]
+        def vscore(sh):
+            return sum(ok for b in (5000, 20000) for _, ok, _ in solve_all(val, sh, b, procs))
+        if vscore(shelf + [bg]) <= vscore(shelf):
+            cands = [g for g in cands if g != bg]; continue
         shelf = shelf + [bg]; new.append(bg); base = best
     return shelf, new
 

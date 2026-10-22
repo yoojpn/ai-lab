@@ -9,8 +9,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        seed: [0,1,2,3]
-        measure: ['','1']
+        seed: [0,1,2,3,4,5,6,7]
+        measure: ['1']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
