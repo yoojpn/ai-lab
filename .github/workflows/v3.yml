@@ -10,6 +10,7 @@ jobs:
       fail-fast: false
       matrix:
         seed: [0,1,2,3]
+        measure: ['','1']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -18,8 +19,8 @@ jobs:
       - run: pip install numpy torch --index-url https://download.pytorch.org/whl/cpu
       - name: 実験
         working-directory: hdc
-        run: SEED=${{ matrix.seed }} python3 exp_v3.py | tee ../out.log
+        run: MEASURE=${{ matrix.measure }} SEED=${{ matrix.seed }} python3 exp_v3.py | tee ../out.log
       - uses: actions/upload-artifact@v4
         with:
-          name: out-${{ matrix.seed }}
+          name: out-${{ matrix.seed }}-${{ strategy.job-index }}
           path: out.log

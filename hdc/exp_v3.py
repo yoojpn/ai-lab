@@ -132,6 +132,33 @@ def sleep(solved_progs, shelf, add_n=3, min_count=6):
     return shelf + new, new
 
 
+
+def sleep_measured(solved_progs, shelf, pool, procs, add_n=3, ncand=24, sub=240, budget=5000):
+    """候補の並びを1つずつ試しに棚へ足し、同じ予算で解ける課題が実際に増えたものだけ残す"""
+    cnt = {}
+    for p in solved_progs:
+        for n in (2, 3, 4):
+            for i in range(len(p) - n + 1):
+                g = tuple(p[i:i + n]); cnt[g] = cnt.get(g, 0) + 1
+    have = set(shelf)
+    cands = [g for _, g in sorted(((c * (len(g) - 1), g) for g, c in cnt.items() if c >= 4 and g not in have), reverse=True)[:ncand]]
+    subset = pool[:sub]
+    def score(sh):
+        return sum(ok for _, ok, _ in solve_all(subset, sh, budget, procs))
+    base = score(shelf); new = []
+    for _ in range(add_n):
+        best, bg = base, None
+        for g in cands:
+            if g in new or g in shelf:
+                continue
+            sc = score(shelf + [g])
+            if sc > best:
+                best, bg = sc, g
+        if bg is None:
+            break
+        shelf = shelf + [bg]; new.append(bg); base = best
+    return shelf, new
+
 # ---------------- LLM型の比較対象: GRUが答えを生成 ----------------
 def enc_examples(ins, outs):
     v = np.zeros((4, 2, 10, 11), np.float32)
@@ -232,7 +259,7 @@ def main():
     for r in range(1, rounds + 1):
         out = solve_all(pool, shelf, BUDGETS[1], procs)
         solved = [p for p, ok, _ in out if p is not None]
-        shelf, new = sleep(solved, shelf)
+        shelf, new = sleep_measured(solved, shelf, pool, procs) if os.environ.get('MEASURE') else sleep(solved, shelf)
         ev = evaluate(test, shelf, procs)
         rec = sum(1 for m in macros if tuple(m) in set(shelf))
         res['round%d' % r] = dict(solved_in_pool='%d/%d' % (len(solved), len(pool)), new_cards=[list(c) for c in new], shelf_size=len(shelf), true_macros_found_exactly=rec, **ev)
