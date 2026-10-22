@@ -133,15 +133,15 @@ def sleep(solved_progs, shelf, add_n=3, min_count=6):
 
 
 
-def sleep_measured(solved_progs, shelf, pool, procs, add_n=3, ncand=24, sub=240, budget=5000):
+def sleep_measured(solved_progs, shelf, pool, procs, add_n=3, ncand=40, sub=300, budget=5000):
     """候補の並びを1つずつ試しに棚へ足し、同じ予算で解ける課題が実際に増えたものだけ残す"""
     cnt = {}
     for p in solved_progs:
-        for n in (2, 3, 4):
+        for n in (2, 3, 4, 5, 6, 8):
             for i in range(len(p) - n + 1):
                 g = tuple(p[i:i + n]); cnt[g] = cnt.get(g, 0) + 1
     have = set(shelf)
-    cands = [g for _, g in sorted(((c * (len(g) - 1), g) for g, c in cnt.items() if c >= 4 and g not in have), reverse=True)[:ncand]]
+    cands = [g for _, g in sorted(((c * (len(g) - 1), g) for g, c in cnt.items() if c >= 3 and g not in have), reverse=True)[:ncand]]
     subset = pool[:sub]
     def score(sh):
         return sum(ok for _, ok, _ in solve_all(subset, sh, budget, procs))
@@ -253,7 +253,7 @@ def main():
     SEED = int(os.environ.get('SEED', '0'))
     rng = np.random.default_rng(SEED)
     macros, forb = make_world(SEED)
-    nT, nU, nL, rounds, gep = (40, 300, 300, 2, 15) if small else (150, 2400, 3000, 6, 40)
+    nT, nU, nL, rounds, gep = (40, 300, 300, 2, 15) if small else (150, 2400, 3000, int(os.environ.get('ROUNDS','10')), 40)
     test = make_tasks(nT, rng, macros, forb, test=True)
     pool = make_tasks(nU, rng, macros, forb, test=False)
     labeled = make_tasks(nL, rng, macros, forb, test=False)
@@ -263,7 +263,7 @@ def main():
     res['round0_primitives_only'] = evaluate(test, shelf, procs)
     print('round0', res['round0_primitives_only'], '%.0fs' % (time.time() - t0), flush=True)
     for r in range(1, rounds + 1):
-        out = solve_all(pool, shelf, BUDGETS[1], procs)
+        out = solve_all(pool, shelf, BUDGETS[2] if os.environ.get('MEASURE') else BUDGETS[1], procs)
         solved = [p for p, ok, _ in out if p is not None]
         shelf, new = sleep_measured(solved, shelf, pool, procs) if os.environ.get('MEASURE') else sleep(solved, shelf)
         ev = evaluate(test, shelf, procs)
