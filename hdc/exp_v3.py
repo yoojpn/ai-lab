@@ -62,14 +62,17 @@ def make_tasks(n, rng, macros, forb, test=False):
 SHELF = [(i,) for i in range(NOP)]
 
 
+CARDCOST = float(os.environ.get('CARDCOST', '1.0'))
+
+
 def search(task, shelf, budget, maxdepth=12):
     ins, outs = task['ins'], task['outs']
     tgt = [list(o) for o in outs[:4]]; start = [list(l) for l in ins[:4]]
     seen = {tuple(tuple(l) for l in start)}
-    heap = [(0, 0, (), start)]; cnt = 0; used = 0
+    heap = [(0.0, 0, (), start, 0)]; cnt = 0; used = 0
     while heap and used < budget:
-        d, _, prog, cur = heapq.heappop(heap)
-        if d >= maxdepth:
+        d, _, prog, cur, nd = heapq.heappop(heap)
+        if nd >= maxdepth:
             continue
         for card in shelf:
             nxt = cur
@@ -84,7 +87,7 @@ def search(task, shelf, budget, maxdepth=12):
             if nxt == tgt:
                 return list(p2), all(run(p2, ins[i]) == outs[i] for i in range(4, 8)), used
             cnt += 1
-            heapq.heappush(heap, (d + 1, cnt, p2, nxt))
+            heapq.heappush(heap, (d + (1.0 if len(card) == 1 else CARDCOST), cnt, p2, nxt, nd + 1))
             if used >= budget:
                 break
     return None, False, used

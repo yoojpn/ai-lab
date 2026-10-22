@@ -11,6 +11,7 @@ jobs:
       matrix:
         seed: [0,1,2,3,4,5,6,7]
         measure: ['1']
+        cc: ['0.5','0.75']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -19,7 +20,7 @@ jobs:
       - run: pip install numpy torch --index-url https://download.pytorch.org/whl/cpu
       - name: 実験
         working-directory: hdc
-        run: MEASURE=${{ matrix.measure }} SEED=${{ matrix.seed }} python3 exp_v3.py | tee ../out.log
+        run: CARDCOST=${{ matrix.cc }} MEASURE=${{ matrix.measure }} SEED=${{ matrix.seed }} python3 exp_v3.py | tee ../out.log
       - uses: actions/upload-artifact@v4
         with:
           name: out-${{ matrix.seed }}-${{ strategy.job-index }}
