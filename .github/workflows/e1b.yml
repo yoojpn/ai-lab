@@ -1,0 +1,27 @@
+name: e1b
+# 穴あきの型(複数粒度のクラス)の自動選択 vs n-gram。WikiText-103。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [4000000, 16000000]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - run: python3 hdc/prep_wikitext.py ${{ matrix.n }} $RUNNER_TEMP/wt.pkl
+      - name: E1b
+        working-directory: hdc
+        shell: bash
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_e1b.py ${{ matrix.n }} 8 | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: e1b-${{ matrix.n }}
+          path: out.log
