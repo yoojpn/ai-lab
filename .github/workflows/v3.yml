@@ -1,0 +1,25 @@
+name: v3
+# 新しい仕組み(棚+検証つき探索+カード発見)対 LLM型(GRU生成+検証)。世界の乱数ごとに並列。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [0,1,2,3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy torch --index-url https://download.pytorch.org/whl/cpu
+      - name: 実験
+        working-directory: hdc
+        run: SEED=${{ matrix.seed }} python3 exp_v3.py | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: out-${{ matrix.seed }}
+          path: out.log
