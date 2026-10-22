@@ -1,0 +1,25 @@
+name: x1
+# X1: 照合器(小さなNN)がカードを選ぶと、同じ実行回数で解ける課題が増えるか。8つの世界で並列。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [0,1,2,3,4,5,6,7]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy torch --index-url https://download.pytorch.org/whl/cpu
+      - name: X1
+        working-directory: hdc
+        run: MEASURE=1 SEED=${{ matrix.seed }} python3 exp_x1.py | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x1-${{ matrix.seed }}
+          path: out.log
