@@ -1,0 +1,25 @@
+name: x4
+# X4: 少ない例から規則を当てる。機械 対 直接出力型の小さなTransformer。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [0,1,2,3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy torch --index-url https://download.pytorch.org/whl/cpu
+      - name: X4
+        working-directory: hdc
+        run: MEASURE=1 SEED=${{ matrix.seed }} python3 exp_x4.py | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x4-${{ matrix.seed }}
+          path: out.log
