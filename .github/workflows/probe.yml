@@ -1,0 +1,18 @@
+name: probe
+on:
+  workflow_dispatch:
+jobs:
+  p:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "nproc=$(nproc)"; grep -m1 'model name' /proc/cpuinfo; grep MemTotal /proc/meminfo
+          pip install -q numpy
+          python3 -c "
+          import numpy as np,time
+          a=np.random.rand(2000,2000).astype('float32');b=a.copy()
+          a@b
+          t=time.time()
+          for _ in range(10): a@b
+          dt=time.time()-t
+          print('GFLOPS(fp32 matmul)=%.1f'%(10*2*2000**3/dt/1e9))"
