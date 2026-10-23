@@ -1,0 +1,35 @@
+name: p
+# P群: 前提を変える案の最初の試験(専門家の検索選択、局所学習、コーパス=モデル、ハッシュ重み、確信度の門)
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {m: p1, n: 4000000, a: 4}
+          - {m: p1, n: 4000000, a: 16}
+          - {m: p2, n: 4000000, a: bp}
+          - {m: p2, n: 4000000, a: local}
+          - {m: p3, n: 4000000, a: x}
+          - {m: p3, n: 16000000, a: x}
+          - {m: p4, n: 4000000, a: x}
+          - {m: p5, n: 4000000, a: x}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - run: python3 hdc/prep_wikitext.py ${{ matrix.n }} $RUNNER_TEMP/wt.pkl
+      - name: 実験
+        working-directory: hdc
+        shell: bash
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_p.py ${{ matrix.m }} ${{ matrix.n }} ${{ matrix.a }} | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p-${{ matrix.m }}-${{ matrix.n }}-${{ matrix.a }}
+          path: out.log
