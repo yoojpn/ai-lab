@@ -1,0 +1,28 @@
+name: llm1
+# LLM1: FFNを記憶層(PKM)に置き換える。WikiText-103。構成ごとに並列。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [4000000, 16000000]
+        v: [ffn256, ffn1024, pkm64, pkm128, pkm256, pkm512, pkm1024]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - run: python3 hdc/prep_wikitext.py ${{ matrix.n }} $RUNNER_TEMP/wt.pkl
+      - name: LLM1
+        working-directory: hdc
+        shell: bash
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_llm1.py ${{ matrix.n }} ${{ matrix.v }} | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llm1-${{ matrix.n }}-${{ matrix.v }}
+          path: out.log
