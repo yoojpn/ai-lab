@@ -1,0 +1,31 @@
+name: p2
+# P群 第2陣: 索引を大きくし続けると改善は伸びるか(最大6400万語)。局所学習は層を増やしても保てるか。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {m: p6, n: 4000000, a: 64000000, prep: 64000000}
+          - {m: p6, n: 16000000, a: 64000000, prep: 64000000}
+          - {m: p2, n: 4000000, a: 'bp:6', prep: 4000000}
+          - {m: p2, n: 4000000, a: 'local:6', prep: 4000000}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - run: python3 hdc/prep_wikitext.py ${{ matrix.prep }} $RUNNER_TEMP/wt.pkl
+      - name: 実験
+        working-directory: hdc
+        shell: bash
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_p.py ${{ matrix.m }} ${{ matrix.n }} '${{ matrix.a }}' | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p2-${{ matrix.m }}-${{ matrix.n }}-${{ strategy.job-index }}
+          path: out.log
