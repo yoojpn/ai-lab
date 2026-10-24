@@ -9,14 +9,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        n: [4000000, 16000000]
+        n: [32000000]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
-      - run: python3 hdc/prep_wikitext.py 20000000 $RUNNER_TEMP/wt.pkl
+      - run: python3 hdc/prep_wikitext.py 36000000 $RUNNER_TEMP/wt.pkl
       - name: f1
         working-directory: hdc
         shell: bash
