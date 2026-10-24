@@ -1,0 +1,27 @@
+name: p6
+# P群 第6陣: 極端に小さなNN(H=4,8,16)と索引6400万語。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [4000000]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - run: python3 hdc/prep_wikitext.py 64000000 $RUNNER_TEMP/wt.pkl
+      - name: p7
+        working-directory: hdc
+        shell: bash
+        run: HS=4,8,16 LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_p.py p7 ${{ matrix.n }} 64000000 | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p6-${{ matrix.n }}
+          path: out.log

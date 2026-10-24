@@ -598,7 +598,7 @@ def main():
     elif mode == 'p6':
         res = p6(ctx, int(arg))
     elif mode == 'p7':
-        res = p7(ctx, int(arg))
+        res = p7(ctx, int(arg), tuple(int(h) for h in os.environ['HS'].split(',')) if os.environ.get('HS') else (32, 64, 128, 256, 512))
     elif mode == 'p8':
         res = p8(ctx, int(arg))
     elif mode == 'p9':
