@@ -385,6 +385,67 @@ def p7(ctx, maxM, Hs=(32, 64, 128, 256, 512)):
     return res
 
 
+def p8(ctx, maxM):
+    """索引の検索を軽くする: 総当たりをやめ、分割(IVF)+圧縮(PQ 16バイト/語)で引く。品質と検索時間を測る"""
+    import faiss
+    E0 = items.ppmi_embeddings(ctx, DE)
+    E32 = E0[:, :32].astype(np.float32)
+    torch.set_num_threads(os.cpu_count() or 2); faiss.omp_set_num_threads(os.cpu_count() or 2)
+    net = lab.train(ctx, 256, 1.0, E0=E0)
+    rn_va = lab.forward_all(net, ctx, 'va'); rn_te = lab.forward_all(net, ctx, 'te')
+    def keys(w3):
+        k = E32[w3].reshape(len(w3), -1)
+        return (k / (np.linalg.norm(k, axis=1, keepdims=True) + 1e-9)).astype(np.float32)
+    nlist, M = 4096, 16
+    quant = faiss.IndexFlatIP(96)
+    index = faiss.IndexIVFPQ(quant, 96, nlist, M, 8, faiss.METRIC_INNER_PRODUCT)
+    yl, tot, buf, trained = [], 0, [], False
+    t0 = time.time()
+    for a in ctx.tr_i:
+        if len(a) < 4:
+            continue
+        w3 = np.stack([a[0:-3], a[1:-2], a[2:-1]], 1)
+        buf.append(keys(w3)); yl.append(a[3:].astype(np.int16)); tot += len(a) - 3
+        if not trained and sum(len(b) for b in buf) >= 1000000:
+            index.train(np.concatenate(buf)[:1000000]); trained = True
+        if trained and sum(len(b) for b in buf) >= 1000000:
+            index.add(np.concatenate(buf)); buf = []
+        if tot >= maxM:
+            break
+    if buf and trained:
+        index.add(np.concatenate(buf))
+    yd = torch.from_numpy(np.concatenate(yl)).long()
+    log('索引 %d 語 構築 %.0fs' % (index.ntotal, time.time() - t0))
+    uni = np.bincount(ctx.ytr, minlength=V).astype(np.float64) + 1; uni /= uni.sum()
+    nq = 20000
+    pnv = rn_va['p'][:nq]; pnt = rn_te['p'][:nq]
+    res = dict(net_bits=bits(pnt), index_tokens=int(index.ntotal), bytes_per_entry=M, runs={})
+    def pk(sc, ix, yq, T):
+        w = torch.softmax(torch.from_numpy(sc) / T, 1)
+        return (w * (yd[torch.from_numpy(ix)] == torch.from_numpy(yq)[:, None])).sum(1).numpy().astype(np.float64)
+    for nprobe in (1, 4, 16):
+        index.nprobe = nprobe
+        t1 = time.time(); sv, iv = index.search(keys(ctx.Xva[:nq, -3:]), 64); tv = time.time() - t1
+        t1 = time.time(); st, it = index.search(keys(ctx.Xte[:nq, -3:]), 64); tt = time.time() - t1
+        ok = iv >= 0; iv = np.where(ok, iv, 0); it = np.where(it >= 0, it, 0)
+        best = None
+        for T in (0.02, 0.05):
+            pkv = pk(sv, iv, ctx.yva[:nq], T)
+            for lam in (0.4, 0.6, 0.8, 0.9):
+                pa = lam * pkv + (1 - lam) * uni[ctx.yva[:nq]]
+                for w in (0.05, 0.1, 0.2, 0.3, 0.5):
+                    bm = bits((1 - w) * pnv + w * pa)
+                    if best is None or bm < best[0]:
+                        best = (bm, T, lam, w)
+        _, T, lam, w = best
+        pa = lam * pk(st, it, ctx.yte[:nq], T) + (1 - lam) * uni[ctx.yte[:nq]]
+        mix = bits((1 - w) * pnt + w * pa)
+        res['runs']['nprobe=%d' % nprobe] = dict(mix=mix, gain=res['net_bits'] - mix, ms_per_query=1000 * tt / nq,
+                                                 lookups_per_query=int(nlist * 96 + nprobe * (index.ntotal / nlist) * M))
+        log('nprobe=%d: 混合 %.4f (改善 %.4f) %.2fms/語 検索の積和相当 %d' % (nprobe, mix, res['net_bits'] - mix, 1000 * tt / nq, res['runs']['nprobe=%d' % nprobe]['lookups_per_query']))
+    return res
+
+
 def main():
     mode = sys.argv[1]; N = int(sys.argv[2]); arg = sys.argv[3] if len(sys.argv) > 3 else None
     torch.set_num_threads(os.cpu_count() or 2)
@@ -405,6 +466,8 @@ def main():
         res = p6(ctx, int(arg))
     elif mode == 'p7':
         res = p7(ctx, int(arg))
+    elif mode == 'p8':
+        res = p8(ctx, int(arg))
     res['mode'] = mode; res['N'] = N; res['sec'] = time.time() - t0
     log('RESULT ' + json.dumps(res, ensure_ascii=False))
 
