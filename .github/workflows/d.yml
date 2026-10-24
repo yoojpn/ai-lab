@@ -1,0 +1,34 @@
+name: d
+# D群: データ効率。学習曲線と頻度帯ごとの損失(d0)、データを節約する工夫6種(d1)。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {m: d0, n: 16000000, l: base}
+          - {m: d1, n: 4000000, l: base}
+          - {m: d1, n: 4000000, l: mt}
+          - {m: d1, n: 4000000, l: ep3}
+          - {m: d1, n: 4000000, l: hard}
+          - {m: d1, n: 4000000, l: aug}
+          - {m: d1, n: 4000000, l: mtaug}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - run: python3 hdc/prep_wikitext.py ${{ matrix.n }} $RUNNER_TEMP/wt.pkl
+      - name: 実験
+        working-directory: hdc
+        shell: bash
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_d.py ${{ matrix.m }} ${{ matrix.n }} ${{ matrix.l }} | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: d-${{ matrix.m }}-${{ matrix.l }}
+          path: out.log
