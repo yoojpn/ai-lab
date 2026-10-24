@@ -446,6 +446,139 @@ def p8(ctx, maxM):
     return res
 
 
+class RNet(torch.nn.Module):
+    """検索を学習に組み込んだNN: 近い場面の次の語(最大K個)を、特徴と出力の加点として使う。いつ信じるかをNNが学ぶ"""
+    def __init__(s, H, E0, T=0.05):
+        super().__init__()
+        s.E = torch.nn.Embedding(V, DE); s.E.weight.data.copy_(torch.from_numpy(E0).float())
+        s.l1 = torch.nn.Linear((NEAR + 1) * DE + DE + 2, H); s.l2 = torch.nn.Linear(H, V); s.gate = torch.nn.Linear(H, 1)
+        s.T = T
+
+    def forward(s, X, Ny, Ns):
+        e = s.E(X)
+        valid = (Ny >= 0)
+        w = torch.softmax(torch.where(valid, Ns / s.T, torch.full_like(Ns, -1e4)), 1) * valid
+        f = (w[..., None] * s.E(Ny.clamp_min(0))).sum(1)
+        ex = torch.stack([Ns.max(1).values, (Ns * valid).sum(1) / valid.sum(1).clamp_min(1)], 1)
+        h = torch.relu(s.l1(torch.cat([e[:, -NEAR:].reshape(len(X), -1), e[:, :-NEAR].mean(1), f, ex], 1)))
+        S = torch.zeros(len(X), V).scatter_add(1, Ny.clamp_min(0), w)
+        return s.l2(h) + torch.nn.functional.softplus(s.gate(h)) * S
+
+
+def p9(ctx, midx):
+    import faiss
+    E0 = items.ppmi_embeddings(ctx, DE)
+    E32 = E0[:, :32].astype(np.float32)
+    torch.set_num_threads(os.cpu_count() or 2); faiss.omp_set_num_threads(os.cpu_count() or 2)
+    t0 = time.time()
+    def keys(w3):
+        k = E32[w3].reshape(len(w3), -1)
+        return (k / (np.linalg.norm(k, axis=1, keepdims=True) + 1e-9)).astype(np.float32)
+    # 索引は、NNの学習に使う文書より後ろの文書から作る(学習窓が自分自身を引かないように)
+    first = int(ctx.mtr.max()) + 1
+    quant = faiss.IndexFlatIP(96); index = faiss.IndexIVFPQ(quant, 96, 4096, 16, 8, faiss.METRIC_INNER_PRODUCT)
+    yl, tot, buf, trained = [], 0, [], False
+    for a in ctx.tr_i[first:]:
+        if len(a) < 4:
+            continue
+        w3 = np.stack([a[0:-3], a[1:-2], a[2:-1]], 1)
+        buf.append(keys(w3)); yl.append(a[3:].astype(np.int16)); tot += len(a) - 3
+        if not trained and sum(len(b) for b in buf) >= 1000000:
+            index.train(np.concatenate(buf)[:1000000]); trained = True
+        if trained and sum(len(b) for b in buf) >= 1000000:
+            index.add(np.concatenate(buf)); buf = []
+        if tot >= midx:
+            break
+    if buf and trained:
+        index.add(np.concatenate(buf))
+    index.make_direct_map()
+    yd = torch.from_numpy(np.concatenate(yl)).long()
+    index.nprobe = 4
+    log('索引 %d 語 (学習窓の文書は除く) 構築 %.0fs' % (index.ntotal, time.time() - t0))
+    K = 16
+    def retrieve(X):
+        S_, N_ = [], []
+        for i in range(0, len(X), 500000):
+            sc, ix = index.search(keys(X[i:i + 500000, -3:]), K)
+            ny = np.where(ix >= 0, yd[torch.from_numpy(np.where(ix >= 0, ix, 0))].numpy(), -1)
+            S_.append(sc.astype(np.float16)); N_.append(ny.astype(np.int16))
+        return torch.from_numpy(np.concatenate(S_)).float(), torch.from_numpy(np.concatenate(N_)).long(), 
+    Str, Ntr = retrieve(ctx.Xtr)[0:2]; log('学習窓の検索 完了 %.0fs' % (time.time() - t0))
+    Sva, Nva = retrieve(ctx.Xva[:100000])[0:2]; Ste, Nte = retrieve(ctx.Xte)[0:2]
+    uni = np.bincount(ctx.ytr, minlength=V).astype(np.float64) + 1; uni /= uni.sum()
+    res = {}
+    # 基準: 普通のNN + 事後の混合
+    base = lab.train(ctx, 256, 1.0, E0=E0)
+    pb_va = lab.forward_all(base, ctx, 'va')['p'][:100000]; pb_te = lab.forward_all(base, ctx, 'te')['p']
+    def pk(Ss, Ns, y, T):
+        valid = Ns >= 0
+        w = torch.softmax(torch.where(valid, Ss / T, torch.full_like(Ss, -1e4)), 1) * valid
+        return (w * (Ns == torch.from_numpy(y)[:, None])).sum(1).numpy().astype(np.float64)
+    def posthoc(pv, pt):
+        best = None
+        for T in (0.02, 0.05):
+            kv = pk(Sva, Nva, ctx.yva[:100000], T)
+            for lam in (0.6, 0.8, 0.9):
+                pa = lam * kv + (1 - lam) * uni[ctx.yva[:100000]]
+                for w in (0.05, 0.1, 0.2, 0.3, 0.5):
+                    bm = bits((1 - w) * pv + w * pa)
+                    if best is None or bm < best[0]:
+                        best = (bm, T, lam, w)
+        _, T, lam, w = best
+        pa = lam * pk(Ste, Nte, ctx.yte, T) + (1 - lam) * uni[ctx.yte]
+        return bits((1 - w) * pt + w * pa), dict(T=T, lam=lam, w=w), bits(pa)
+    res['base_nn'] = bits(pb_te)
+    res['base_posthoc'], res['base_posthoc_params'], res['knn_alone'] = posthoc(pb_va, pb_te)
+    log('基準 NN %.4f / NN+事後混合 %.4f / 検索だけ %.4f' % (res['base_nn'], res['base_posthoc'], res['knn_alone']))
+    # 検索を学習に組み込む
+    torch.manual_seed(0)
+    net = RNet(256, E0); opt = torch.optim.Adam(net.parameters(), lr=2e-3)
+    X = torch.from_numpy(ctx.Xtr); y = torch.from_numpy(ctx.ytr); steps = len(X) // 512; st = 0
+    for i in torch.randperm(len(X)).split(512):
+        if len(i) < 512:
+            break
+        for g in opt.param_groups:
+            g['lr'] = 2e-3 if st < 0.6 * steps else 1e-3
+        loss = torch.nn.functional.cross_entropy(net(X[i], Ntr[i], Str[i]), y[i])
+        opt.zero_grad(); loss.backward(); opt.step(); st += 1
+    def probs(Xa, Na, Sa, ya):
+        out = []
+        with torch.no_grad():
+            for i in range(0, len(Xa), 4096):
+                z = net(torch.from_numpy(Xa[i:i + 4096]), Na[i:i + 4096], Sa[i:i + 4096]); lp = torch.log_softmax(z, 1)
+                out.append(lp[torch.arange(len(z)), torch.from_numpy(ya[i:i + 4096])].exp().numpy())
+        return np.concatenate(out).astype(np.float64)
+    pr_va = probs(ctx.Xva[:100000], Nva, Sva, ctx.yva[:100000]); pr_te = probs(ctx.Xte, Nte, Ste, ctx.yte)
+    res['loop_nn'] = bits(pr_te)
+    res['loop_posthoc'], res['loop_posthoc_params'], _ = posthoc(pr_va, pr_te)
+    log('検索を学習に組み込んだNN %.4f / さらに事後混合 %.4f (基準の最良 %.4f)' % (res['loop_nn'], res['loop_posthoc'], res['base_posthoc']))
+    # カーネルリッジの重み(近傍同士の似かよりを補正)
+    def ridge_pk(Xq, Sq, Nq, y, lam):
+        out = []
+        for i in range(0, len(Xq), 2000):
+            ids = np.zeros((min(2000, len(Xq) - i), K), np.int64)
+            sc, ix = index.search(keys(Xq[i:i + 2000, -3:]), K)
+            B = len(ix); ok = ix >= 0
+            vec = np.stack([index.reconstruct_batch(np.where(ok[:, j], ix[:, j], 0)) for j in range(K)], 1)
+            q = torch.from_numpy(keys(Xq[i:i + 2000, -3:]))
+            V_ = torch.from_numpy(vec)
+            G = V_ @ V_.transpose(1, 2); s_ = (V_ @ q[..., None])[..., 0]
+            a = torch.linalg.solve(G + lam * torch.eye(K)[None], s_[..., None])[..., 0].clamp_min(0)
+            a = a * torch.from_numpy(ok)
+            a = a / a.sum(1, keepdim=True).clamp_min(1e-9)
+            ny = torch.from_numpy(np.where(ok, yd[torch.from_numpy(np.where(ok, ix, 0))].numpy(), -1))
+            out.append((a * (ny == torch.from_numpy(y[i:i + 2000])[:, None])).sum(1).numpy().astype(np.float64))
+        return np.concatenate(out)
+    nq = 30000
+    for lam in (0.1, 0.5, 2.0):
+        pa = 0.9 * ridge_pk(ctx.Xte[:nq], None, None, ctx.yte[:nq], lam) + 0.1 * uni[ctx.yte[:nq]]
+        pa_soft = 0.9 * pk(Ste[:nq], Nte[:nq], ctx.yte[:nq], 0.05) + 0.1 * uni[ctx.yte[:nq]]
+        res['ridge_lam=%s' % lam] = dict(knn_alone_ridge=bits(pa), knn_alone_softmax=bits(pa_soft),
+                                          mix_ridge=bits(0.8 * pb_te[:nq] + 0.2 * pa), mix_softmax=bits(0.8 * pb_te[:nq] + 0.2 * pa_soft))
+        log('ridge lam=%s %s' % (lam, res['ridge_lam=%s' % lam]))
+    return res
+
+
 def main():
     mode = sys.argv[1]; N = int(sys.argv[2]); arg = sys.argv[3] if len(sys.argv) > 3 else None
     torch.set_num_threads(os.cpu_count() or 2)
@@ -468,6 +601,8 @@ def main():
         res = p7(ctx, int(arg))
     elif mode == 'p8':
         res = p8(ctx, int(arg))
+    elif mode == 'p9':
+        res = p9(ctx, int(arg))
     res['mode'] = mode; res['N'] = N; res['sec'] = time.time() - t0
     log('RESULT ' + json.dumps(res, ensure_ascii=False))
 
