@@ -1,0 +1,65 @@
+name: g
+# G群: 勾配ゼロのモデルの工夫(次数/飛ばし/重みの分け方/鍵/極小NN/語数)を19個並列で測る。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ctl
+            cfg: '{"N":16000000}'
+          - name: m4
+            cfg: '{"N":16000000,"main":4}'
+          - name: skip
+            cfg: '{"N":16000000,"skip":1}'
+          - name: m4skip
+            cfg: '{"N":16000000,"main":4,"skip":1}'
+          - name: bkt
+            cfg: '{"N":16000000,"bucket":1}'
+          - name: m4skipbkt
+            cfg: '{"N":16000000,"main":4,"skip":1,"bucket":1}'
+          - name: rand16
+            cfg: '{"N":16000000,"key":"rand","de":16}'
+          - name: de16
+            cfg: '{"N":16000000,"de":16}'
+          - name: de32
+            cfg: '{"N":16000000,"de":32}'
+          - name: nn16_1M
+            cfg: '{"N":16000000,"nn_h":16,"nn_n":1000000}'
+          - name: nn16_4M
+            cfg: '{"N":16000000,"nn_h":16,"nn_n":4000000}'
+          - name: nn64_4M
+            cfg: '{"N":16000000,"nn_h":64,"nn_n":4000000}'
+          - name: d09
+            cfg: '{"N":16000000,"main":4,"delta":0.9}'
+          - name: d06
+            cfg: '{"N":16000000,"main":4,"delta":0.6}'
+          - name: noidx
+            cfg: '{"N":16000000,"key":"none","main":4,"skip":1,"bucket":1}'
+          - name: m4skipbkt_nn16
+            cfg: '{"N":16000000,"nn_h":16,"nn_n":1000000,"main":4,"skip":1,"bucket":1}'
+          - name: big32
+            cfg: '{"N":32000000,"de":32,"main":4,"skip":1,"bucket":1}'
+          - name: big40
+            cfg: '{"N":40000000,"de":32,"main":4,"skip":1,"bucket":1}'
+          - name: big32_nn16
+            cfg: '{"N":32000000,"de":32,"nn_h":16,"nn_n":2000000,"main":4,"skip":1,"bucket":1}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: g
+        working-directory: hdc
+        shell: bash
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_g.py '${{ matrix.cfg }}' | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: g-${{ matrix.name }}
+          path: out.log
