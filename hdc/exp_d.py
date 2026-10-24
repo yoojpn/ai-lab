@@ -110,7 +110,11 @@ def main():
     ctx = lab.load(Nmax)
     log('データ準備 [%.0fs]' % (time.time() - t0))
     res = dict(mode=mode, lever=lever, rows=[])
-    if mode == 'd0':
+    if mode == 'd2':
+        H = int(lever)
+        ns = [n for n in (250000, 1000000, 4000000, 16000000) if n <= len(ctx.Xtr)]
+        lv = 'base'
+    elif mode == 'd0':
         ns = [n for n in (250000, 500000, 1000000, 2000000, 4000000, 8000000, 16000000) if n <= len(ctx.Xtr)]
         lv = 'base'
     else:
@@ -119,7 +123,7 @@ def main():
     if os.environ.get('DNS'):
         ns = [int(x) for x in os.environ['DNS'].split(',')]
     for n in ns:
-        net = train_lever(ctx, n, lv)
+        net = train_lever(ctx, n, lv, H=(int(lever) if mode == 'd2' else 256))
         b, bins = evaluate(net, ctx)
         res['rows'].append(dict(n=n, bits=b, bins=bins, sec=time.time() - t0))
         log('lever=%s n=%d: %.4f bit/語 %s [%.0fs]' % (lv, n, b, {k: round(v['contribution'], 3) for k, v in bins.items()}, time.time() - t0))

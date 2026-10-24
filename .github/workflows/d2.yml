@@ -1,0 +1,27 @@
+name: d2
+# D2: データ飢餓の指数。容量(H)を変えて、読ませる語数を変えたときの品質の曲線。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        h: [64, 256, 1024]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - run: python3 hdc/prep_wikitext.py 16000000 $RUNNER_TEMP/wt.pkl
+      - name: D2
+        working-directory: hdc
+        shell: bash
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_d.py d2 16000000 ${{ matrix.h }} | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: d2-${{ matrix.h }}
+          path: out.log
