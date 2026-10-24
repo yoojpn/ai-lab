@@ -42,7 +42,7 @@ def f1(ctx, nq):
     def keys(X):
         k = E0[X[:, -3:]].reshape(len(X), -1).astype(np.float32)
         return k / (np.linalg.norm(k, axis=1, keepdims=True) + 1e-9)
-    Kd = torch.cat([torch.from_numpy(keys(ctx.Xtr[i:i + 500000])).half() for i in range(0, N, 500000)])
+    Kd = torch.cat([torch.from_numpy(np.round(keys(ctx.Xtr[i:i + 500000]) * 127).astype(np.int8)) for i in range(0, N, 500000)])   # int8で3GB(32M語)
     yd = torch.from_numpy(ctx.ytr)
     res['ops_index'] = float(N * 3 * DE)          # 鍵を作る = 埋め込み引きと正規化(数回のN倍)
     def knn(Xq, yq, T, k=64):
@@ -50,7 +50,7 @@ def f1(ctx, nq):
         for qi in range(0, len(Q), 500):
             qb = Q[qi:qi + 500]; bs = bi = None
             for c in range(0, N, 500000):
-                s = qb @ Kd[c:c + 500000].float().T
+                s = qb @ (Kd[c:c + 500000].float() / 127).T
                 v, ix = s.topk(k, 1); ix = ix + c
                 if bs is None: bs, bi = v, ix
                 else:
