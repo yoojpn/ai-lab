@@ -1,0 +1,43 @@
+name: r
+# R群: 検索を学習に組み込む(RNet)の条件振り。索引の大きさ、NNの大きさ、近傍の数、鍵、部品の外し、NNの学習量。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {n: 4000000, tag: 'midx8000000', cfg: '{"midx": 8000000}'}
+          - {n: 4000000, tag: 'midx64000000', cfg: '{"midx": 64000000}'}
+          - {n: 4000000, tag: 'H32', cfg: '{"H": 32}'}
+          - {n: 4000000, tag: 'H64', cfg: '{"H": 64}'}
+          - {n: 4000000, tag: 'H128', cfg: '{"H": 128}'}
+          - {n: 4000000, tag: 'H512', cfg: '{"H": 512}'}
+          - {n: 4000000, tag: 'K4', cfg: '{"K": 4}'}
+          - {n: 4000000, tag: 'K64', cfg: '{"K": 64}'}
+          - {n: 4000000, tag: 'keyk5', cfg: '{"key": "k5"}'}
+          - {n: 4000000, tag: 'keym8', cfg: '{"key": "m8"}'}
+          - {n: 4000000, tag: 'ablnogate', cfg: '{"abl": "nogate"}'}
+          - {n: 4000000, tag: 'ablnofeat', cfg: '{"abl": "nofeat"}'}
+          - {n: 4000000, tag: 'ablnoboost', cfg: '{"abl": "noboost"}'}
+          - {n: 16000000, tag: 'H256', cfg: '{"H": 256}'}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy faiss-cpu torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - run: python3 hdc/prep_wikitext.py 64000000 $RUNNER_TEMP/wt.pkl
+      - name: R
+        working-directory: hdc
+        shell: bash
+        env:
+          CFG: ${{ matrix.cfg }}
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_p.py p10 ${{ matrix.n }} "$CFG" | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r-${{ strategy.job-index }}
+          path: out.log
