@@ -312,6 +312,78 @@ def p6(ctx, maxM):
         log('索引%d語: 混合 %.4f (改善 %.4f)' % (m, res['ds=%d' % m]['mix'], res['ds=%d' % m]['gain']))
     return res
 
+def p7(ctx, maxM, Hs=(32, 64, 128, 256, 512)):
+    """索引を大きくし続けると、改善は伸び続けるか。NNは ctx の窓(N語)で学習。索引は文書全体の先頭から maxM 語まで(int8の96次元キー)"""
+    E0 = items.ppmi_embeddings(ctx, DE)
+    E32 = E0[:, :32].astype(np.float32)
+    torch.set_num_threads(os.cpu_count() or 2)
+    def keys(w3):
+        k = E32[w3].reshape(len(w3), -1)
+        k = k / (np.linalg.norm(k, axis=1, keepdims=True) + 1e-9)
+        return k
+    Kl, yl, tot = [], [], 0
+    for a in ctx.tr_i:
+        if len(a) < 4:
+            continue
+        w3 = np.stack([a[0:-3], a[1:-2], a[2:-1]], 1)
+        Kl.append(np.round(keys(w3) * 127).astype(np.int8)); yl.append(a[3:].astype(np.int16)); tot += len(a) - 3
+        if tot >= maxM:
+            break
+    Kd = torch.from_numpy(np.concatenate(Kl)); yd = torch.from_numpy(np.concatenate(yl)).long()
+    del Kl, yl
+    log('索引 %d 語 (%.1fGB)' % (len(Kd), Kd.numel() / 1e9))
+    uni = np.bincount(ctx.ytr, minlength=V).astype(np.float64) + 1; uni /= uni.sum()
+    nq = 20000
+    sizes = [m for m in (4000000, 16000000, 32000000, 64000000) if m <= len(Kd)]
+    if len(Kd) not in sizes:
+        sizes.append(len(Kd))
+    def knn(Xq, k=64):
+        Q = torch.from_numpy(keys(Xq[:, -3:]).astype(np.float32) * 127)
+        out = {m: [[], []] for m in sizes}
+        for qi in range(0, len(Q), 1000):
+            qb = Q[qi:qi + 1000]; bs = bi = None; done = {}
+            for c in range(0, sizes[-1], 250000):
+                e = min(c + 250000, sizes[-1])
+                s_ = qb @ Kd[c:e].float().T
+                v, ix = s_.topk(k, 1); ix = ix + c
+                if bs is None:
+                    bs, bi = v, ix
+                else:
+                    bs, j = torch.cat([bs, v], 1).topk(k, 1); bi = torch.cat([bi, ix], 1).gather(1, j)
+                for m in sizes:
+                    if e == m:
+                        done[m] = (bs.clone(), bi.clone())
+            for m in sizes:
+                out[m][0].append(done[m][0] / 127 / 127); out[m][1].append(done[m][1])
+        return {m: (torch.cat(out[m][0]), torch.cat(out[m][1])) for m in sizes}
+    kv = knn(ctx.Xva[:nq]); kt = knn(ctx.Xte[:nq])
+    res = dict(index_tokens=int(len(Kd)), nets={})
+    def pk(sc_ix, yq, T):
+        sc, ix = sc_ix
+        w = torch.softmax(sc / T, 1)
+        return (w * (yd[ix] == torch.from_numpy(yq)[:, None])).sum(1).numpy().astype(np.float64)
+    for H in Hs:
+        net = lab.train(ctx, H, 1.0, E0=E0)
+        rn_va = lab.forward_all(net, ctx, 'va'); rn_te = lab.forward_all(net, ctx, 'te')
+        pnv = rn_va['p'][:nq]; pnt = rn_te['p'][:nq]
+        r = dict(macs=macs_net(H), params=sum(p.numel() for p in net.parameters()), net_bits=bits(pnt))
+        for m in sizes:
+            best = None
+            for T in (0.02, 0.05):
+                pkv = pk(kv[m], ctx.yva[:nq], T)
+                for lam in (0.4, 0.6, 0.8, 0.9):
+                    pa = lam * pkv + (1 - lam) * uni[ctx.yva[:nq]]
+                    for w in (0.05, 0.1, 0.2, 0.3, 0.5):
+                        bm = bits((1 - w) * pnv + w * pa)
+                        if best is None or bm < best[0]:
+                            best = (bm, T, lam, w)
+            _, T, lam, w = best
+            pa = lam * pk(kt[m], ctx.yte[:nq], T) + (1 - lam) * uni[ctx.yte[:nq]]
+            r['ds=%d' % m] = bits((1 - w) * pnt + w * pa)
+        res['nets']['H=%d' % H] = r
+        log('H=%d %s' % (H, r))
+    return res
+
 
 def main():
     mode = sys.argv[1]; N = int(sys.argv[2]); arg = sys.argv[3] if len(sys.argv) > 3 else None
@@ -331,6 +403,8 @@ def main():
         res = p5(ctx)
     elif mode == 'p6':
         res = p6(ctx, int(arg))
+    elif mode == 'p7':
+        res = p7(ctx, int(arg))
     res['mode'] = mode; res['N'] = N; res['sec'] = time.time() - t0
     log('RESULT ' + json.dumps(res, ensure_ascii=False))
 
