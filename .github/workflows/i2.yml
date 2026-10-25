@@ -1,0 +1,82 @@
+name: i2
+# I群: 勾配ゼロで「教えていないこと」を引き出す第2陣(修正版 prune/ngh2/遠いキャッシュ幅/割引/グループ数)(文献: infini-gram, n-gram heads/induction)。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: j01_prune2_all
+            corpus: wt
+            cfg: '{"cls":1000,"mixcls":1000,"main":8,"ngh":1,"far":1,"bucket":"conf","N":16000000,"prune":2}'
+          - name: j02_prune4_all
+            corpus: wt
+            cfg: '{"cls":1000,"mixcls":1000,"main":8,"ngh":1,"far":1,"bucket":"conf","N":16000000,"prune":4}'
+          - name: j03_infini16M
+            corpus: wt
+            cfg: '{"N":16000000,"main":12,"ngh":1,"far":1,"bucket":"ngh"}'
+          - name: j04_ngh2_base
+            corpus: wt
+            cfg: '{"N":16000000,"ngh2":1}'
+          - name: j05_ngh2_all
+            corpus: wt
+            cfg: '{"cls":1000,"mixcls":1000,"main":8,"ngh":1,"far":1,"bucket":"conf","N":16000000,"ngh2":1}'
+          - name: j06_farW1000
+            corpus: wt
+            cfg: '{"N":16000000,"far":1,"farW":1000}'
+          - name: j07_farW3000
+            corpus: wt
+            cfg: '{"N":16000000,"far":1,"farW":3000}'
+          - name: j08_all40M_ngh2
+            corpus: wt
+            cfg: '{"cls":1000,"mixcls":1000,"main":8,"ngh":1,"far":1,"bucket":"conf","N":40000000,"ngh2":1}'
+          - name: j09_code_all_ngh2
+            corpus: code
+            cfg: '{"cls":1000,"mixcls":1000,"main":8,"ngh":1,"far":1,"bucket":"conf","N":20000000,"ngh2":1}'
+          - name: j10_all40M_nn256
+            corpus: wt
+            cfg: '{"cls":1000,"mixcls":1000,"main":8,"ngh":1,"far":1,"bucket":"conf","N":40000000,"nn_h":256,"nn_n":16000000}'
+          - name: j11_all40M_nn16
+            corpus: wt
+            cfg: '{"cls":1000,"mixcls":1000,"main":8,"ngh":1,"far":1,"bucket":"conf","N":40000000,"nn_h":16,"nn_n":4000000}'
+          - name: j12_code_all_nn256
+            corpus: code
+            cfg: '{"cls":1000,"mixcls":1000,"main":8,"ngh":1,"far":1,"bucket":"conf","N":20000000,"nn_h":256,"nn_n":4000000}'
+          - name: j13_cls_ngh2
+            corpus: wt
+            cfg: '{"N":16000000,"cls":1000,"ngh2":1}'
+          - name: j14_code_prune2_all
+            corpus: code
+            cfg: '{"cls":1000,"mixcls":1000,"main":8,"ngh":1,"far":1,"bucket":"conf","N":20000000,"prune":2}'
+          - name: j15_all16M_d095
+            corpus: wt
+            cfg: '{"cls":1000,"mixcls":1000,"main":8,"ngh":1,"far":1,"bucket":"conf","N":16000000,"delta":0.95}'
+          - name: j16_all16M_d10
+            corpus: wt
+            cfg: '{"cls":1000,"mixcls":1000,"main":8,"ngh":1,"far":1,"bucket":"conf","N":16000000,"delta":1.0}'
+          - name: j17_all16M_cls3000
+            corpus: wt
+            cfg: '{"cls":3000,"mixcls":3000,"main":8,"ngh":1,"far":1,"bucket":"conf","N":16000000}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - if: matrix.corpus == 'wt'
+        run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: |
+          if [ "${{ matrix.corpus }}" = "wt" ]; then LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_i.py '${{ matrix.cfg }}' | tee ../out.log
+          elif [ "${{ matrix.corpus }}" = "code" ]; then LADDER_CORPUS=$RUNNER_TEMP/code.pkl python3 exp_i.py '${{ matrix.cfg }}' | tee ../out.log
+          else python3 exp_k.py | tee ../out.log; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out.log

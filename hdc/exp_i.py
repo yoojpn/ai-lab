@@ -44,10 +44,10 @@ class HChain:
             uc, inv, tot = np.unique(ck, return_inverse=True, return_counts=True)
             up, pc = np.unique(inv.astype(np.int64) * V + y, return_counts=True)
             del inv
+            typ = np.bincount(up // V, minlength=len(uc))      # 捨てる前の種類数(退避の重みに使う)
             if prune > 1 and len(spec) >= 2:
                 keep = pc >= prune
                 up, pc = up[keep], pc[keep]
-            typ = np.bincount(up // V, minlength=len(uc))
             s.t.append((uc, tot, typ, up, pc)); s.entries += len(up) + len(uc)
 
     def probs(s, X, y):
@@ -85,6 +85,26 @@ def ngh(docs, mid, pos, y, pu):
             if len(idx):
                 pred = a[idx[-1] + 1]
                 P[q] = 0.9 * (pred == y[q]) + 0.1 * pu[y[q]]; S[q] = k
+                break
+    return P, S
+
+
+def ngh2(docs, mid, pos, y, pu, kmax=5):
+    """文書内のn-gram head 第2版: 直前kmax〜1語と同じ並びが前に何度かあれば、その次の語を多数決(窓の外も見る)"""
+    n = len(y); P = pu[y].copy(); S = np.zeros(n, int)
+    for q in range(n):
+        a = docs[mid[q]]; p = int(pos[q])
+        for k in range(kmax, 0, -1):
+            if p - k < 0 or a[p - 1] == 0: continue
+            idx = np.nonzero(a[:p - 1] == a[p - 1])[0]
+            idx = idx[idx >= k - 1]
+            ok = np.ones(len(idx), bool)
+            for d in range(1, k):
+                ok &= a[idx - d] == a[p - 1 - d]
+            idx = idx[ok]
+            if len(idx):
+                nxt = a[idx + 1]
+                P[q] = 0.9 * (nxt == y[q]).mean() + 0.1 * pu[y[q]]; S[q] = k
                 break
     return P, S
 
@@ -151,10 +171,13 @@ def run(cfg):
     if cfg.get('ngh'):
         pv, Sv = ngh(ctx.va_i, ctx.mva[:nv], ctx.pva[:nv], yva, pu); pt_, St = ngh(ctx.te_i, ctx.mte[sl], ctx.pte[sl], yte, pu)
         Pv.append(pv); Pt.append(pt_); names.append('ngh')
+    if cfg.get('ngh2'):
+        pv, S2v = ngh2(ctx.va_i, ctx.mva[:nv], ctx.pva[:nv], yva, pu); pt_, S2t = ngh2(ctx.te_i, ctx.mte[sl], ctx.pte[sl], yte, pu)
+        Pv.append(pv); Pt.append(pt_); names.append('ngh2')
     if cfg.get('far'):
         cpv, _ = XC.copy_probs(Xva, yva, pu); cpt, _ = XC.copy_probs(Xte, yte, pu)
-        Pv += [cpv, XC.cache_probs(Xva, yva, pu), XF.farcache_probs(ctx.va_i, ctx.mva[:nv], ctx.pva[:nv], yva, 300, pu)]
-        Pt += [cpt, XC.cache_probs(Xte, yte, pu), XF.farcache_probs(ctx.te_i, ctx.mte[sl], ctx.pte[sl], yte, 300, pu)]
+        Pv += [cpv, XC.cache_probs(Xva, yva, pu), XF.farcache_probs(ctx.va_i, ctx.mva[:nv], ctx.pva[:nv], yva, cfg.get('farW', 300), pu)]
+        Pt += [cpt, XC.cache_probs(Xte, yte, pu), XF.farcache_probs(ctx.te_i, ctx.mte[sl], ctx.pte[sl], yte, cfg.get('farW', 300), pu)]
         names += ['copy', 'cache', 'farcache']
     # 極小NN
     net = None
