@@ -137,7 +137,7 @@ def run(cfg):
             return out * 0.98 + 0.02 * pu[yq]
         best = None
         for T in (0.02, 0.05):
-            kv = knn(Xva, yva, T); b = final(Pva + [kv], Pte + [kv])   # 重みの選び方確認用(後でテストに使うのは最良のTだけ)
+            kv = knn(Xva, yva, T); Pv = np.array(Pva + [kv]); b = bits((L.em(Pv)[:, None] * Pv).sum(0))   # Tは検証側だけで選ぶ
             if best is None or b < best[0]: best = (b, T, kv)
         _, T, kv = best
         Pva.append(kv); Pte.append(knn(Xte, yte, T)); names.append('index'); res['T'] = T
