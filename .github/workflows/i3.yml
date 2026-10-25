@@ -1,0 +1,82 @@
+name: i3
+# I3群: 品質を変えずに計算量を下げる。部品を1つずつ外して、品質が変わらないものを捨てる。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: a02_no_cls_mixcls
+            corpus: wt
+            cfg: '{"N":16000000,"cls":0,"mixcls":0,"main":8,"ngh":1,"ngh2":1,"far":1,"bucket":"conf"}'
+          - name: a03_no_mixcls
+            corpus: wt
+            cfg: '{"N":16000000,"cls":1000,"mixcls":0,"main":8,"ngh":1,"ngh2":1,"far":1,"bucket":"conf"}'
+          - name: a04_no_cls
+            corpus: wt
+            cfg: '{"N":16000000,"cls":0,"mixcls":1000,"main":8,"ngh":1,"ngh2":1,"far":1,"bucket":"conf"}'
+          - name: a05_main4
+            corpus: wt
+            cfg: '{"N":16000000,"cls":1000,"mixcls":1000,"main":4,"ngh":1,"ngh2":1,"far":1,"bucket":"conf"}'
+          - name: a06_main5
+            corpus: wt
+            cfg: '{"N":16000000,"cls":1000,"mixcls":1000,"main":5,"ngh":1,"ngh2":1,"far":1,"bucket":"conf"}'
+          - name: a07_no_skipB
+            corpus: wt
+            cfg: '{"N":16000000,"cls":1000,"mixcls":1000,"main":8,"ngh":1,"ngh2":1,"far":1,"bucket":"conf","skipB":0}'
+          - name: a08_no_skipA
+            corpus: wt
+            cfg: '{"N":16000000,"cls":1000,"mixcls":1000,"main":8,"ngh":1,"ngh2":1,"far":1,"bucket":"conf","skipA":0}'
+          - name: a09_no_skip
+            corpus: wt
+            cfg: '{"N":16000000,"cls":1000,"mixcls":1000,"main":8,"ngh":1,"ngh2":1,"far":1,"bucket":"conf","skipA":0,"skipB":0}'
+          - name: a10_no_far
+            corpus: wt
+            cfg: '{"N":16000000,"cls":1000,"mixcls":1000,"main":8,"ngh":1,"ngh2":1,"far":0,"bucket":"conf"}'
+          - name: a11_no_ngh
+            corpus: wt
+            cfg: '{"N":16000000,"cls":1000,"mixcls":1000,"main":8,"ngh":0,"ngh2":1,"far":1,"bucket":"conf"}'
+          - name: a12_no_bucket
+            corpus: wt
+            cfg: '{"N":16000000,"cls":1000,"mixcls":1000,"main":8,"ngh":1,"ngh2":1,"far":1,"bucket":"none"}'
+          - name: a13_svd16
+            corpus: wt
+            cfg: '{"N":16000000,"cls":1000,"mixcls":1000,"main":8,"ngh":1,"ngh2":1,"far":1,"bucket":"conf","svd_dim":16}'
+          - name: a14_svd16_k200
+            corpus: wt
+            cfg: '{"N":16000000,"cls":200,"mixcls":200,"main":8,"ngh":1,"ngh2":1,"far":1,"bucket":"conf","svd_dim":16}'
+          - name: a15_min1
+            corpus: wt
+            cfg: '{"N":16000000,"main":5,"ngh":1,"ngh2":1,"far":1,"bucket":"none"}'
+          - name: a16_min2
+            corpus: wt
+            cfg: '{"N":16000000,"main":5,"skipB":0,"ngh2":1,"far":1,"bucket":"none"}'
+          - name: a17_40M_no_cls
+            corpus: wt
+            cfg: '{"N":40000000,"cls":0,"mixcls":0,"main":8,"ngh":1,"ngh2":1,"far":1,"bucket":"conf"}'
+          - name: a18_40M_min1
+            corpus: wt
+            cfg: '{"N":40000000,"main":5,"ngh":1,"ngh2":1,"far":1,"bucket":"none"}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - if: matrix.corpus == 'wt'
+        run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: |
+          if [ "${{ matrix.corpus }}" = "wt" ]; then LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_i.py '${{ matrix.cfg }}' | tee ../out.log
+          elif [ "${{ matrix.corpus }}" = "code" ]; then LADDER_CORPUS=$RUNNER_TEMP/code.pkl python3 exp_i.py '${{ matrix.cfg }}' | tee ../out.log
+          else python3 exp_k.py | tee ../out.log; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out.log

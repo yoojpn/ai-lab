@@ -142,17 +142,20 @@ def run(cfg):
     K = max(cfg.get('cls', 0), cfg.get('mixcls', 0)); cls = np.zeros(V, np.int64)
     E0 = None
     if K or cfg.get('nn_h', 0):
-        E0 = items.ppmi_embeddings(ctx, lab.DE); ops['svd'] = float(2 * V * V * lab.DE * 7 + 22 * N + 10 * V * V)
+        dsv = lab.DE if cfg.get('nn_h', 0) else cfg.get('svd_dim', lab.DE)
+        E0 = items.ppmi_embeddings(ctx, dsv); ops['svd'] = float(2 * V * V * dsv * 7 + 22 * N + 10 * V * V)
     if K:
         from scipy.cluster.vq import kmeans2
         En = E0 / (np.linalg.norm(E0, axis=1, keepdims=True) + 1e-9)
         _, lab_ = kmeans2(En.astype(np.float64), K, minit='++', seed=1)
-        cls = lab_.astype(np.int64); ops['kmeans'] = float(10 * V * K * lab.DE * 2)
+        cls = lab_.astype(np.int64); ops['kmeans'] = float(10 * V * K * E0.shape[1] * 2)
     R = lambda *ps: [('r', p) for p in ps]
     C = lambda *ps: [('c', p) for p in ps]
     order = cfg.get('main', 3)
     specs = {'main': [[]] + [R(*range(1, k + 1)) for k in range(1, order + 1)],
-             'skipA': [[], R(2), R(2, 3), R(2, 3, 4)], 'skipB': [[], R(1), R(1, 3), R(1, 3, 4)]}
+             }
+    if cfg.get('skipA', 1): specs['skipA'] = [[], R(2), R(2, 3), R(2, 3, 4)]
+    if cfg.get('skipB', 1): specs['skipB'] = [[], R(1), R(1, 3), R(1, 3, 4)]
     if cfg.get('cls'): specs['cls'] = [[], C(1), C(1, 2), C(1, 2, 3)]
     if cfg.get('mixcls'): specs['mixcls'] = [[], R(1), R(1) + C(2), R(1) + C(2, 3)]
     chains, names = {}, []
