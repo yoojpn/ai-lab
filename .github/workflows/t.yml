@@ -1,0 +1,49 @@
+name: t
+# T群: ちゃんとした小さなTransformerの「実測時間 vs bit/語」。数える方式(軽い構成: 約35秒で5.49)と同じ品質に届くまでの時間を比べる。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: t1_d128_l2_1ep
+            corpus: wt
+            cfg: '{"N":16000000,"d":128,"nl":2,"epochs":1}'
+          - name: t2_d192_l3_1ep
+            corpus: wt
+            cfg: '{"N":16000000,"d":192,"nl":3,"epochs":1}'
+          - name: t3_d256_l4_1ep
+            corpus: wt
+            cfg: '{"N":16000000,"d":256,"nl":4,"epochs":1}'
+          - name: t4_d384_l4_8M
+            corpus: wt
+            cfg: '{"N":8000000,"d":384,"nl":4,"epochs":1}'
+          - name: t5_d128_l2_3ep
+            corpus: wt
+            cfg: '{"N":16000000,"d":128,"nl":2,"epochs":3}'
+          - name: t6_d128_l2_40M
+            corpus: wt
+            cfg: '{"N":40000000,"d":128,"nl":2,"epochs":1}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - if: matrix.corpus == 'wt'
+        run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: |
+          if [ "${{ matrix.corpus }}" = "wt" ]; then LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_t.py '${{ matrix.cfg }}' | tee ../out.log
+          elif [ "${{ matrix.corpus }}" = "code" ]; then LADDER_CORPUS=$RUNNER_TEMP/code.pkl python3 exp_t.py '${{ matrix.cfg }}' | tee ../out.log
+          else python3 exp_k.py | tee ../out.log; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out.log
