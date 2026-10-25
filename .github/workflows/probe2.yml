@@ -1,0 +1,25 @@
+name: probe2
+# データ候補の公開情報(ライセンス/会員限定/ファイル)を、実行環境から取れるか確かめる
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: probe
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request
+          ids = ["Salesforce/wikitext","codeparrot/codeparrot-clean","codeparrot/github-code-clean","bigcode/the-stack-smol",
+                 "sedthh/gutenberg_english","manu/project_gutenberg","roskoN/dailydialog","Cynaptics/persona-chat",
+                 "HuggingFaceFW/fineweb","HuggingFaceFW/fineweb-edu","allenai/c4","wikimedia/wikipedia","open-web-math/open-web-math",
+                 "pg19","deepmind/pg19","lvwerra/stack-exchange-paired","bigcode/starcoderdata","HuggingFaceTB/cosmopedia","roneneldan/TinyStories"]
+          for i in ids:
+              try:
+                  d = json.load(urllib.request.urlopen("https://huggingface.co/api/datasets/" + i, timeout=30))
+                  c = d.get("cardData") or {}
+                  print("%-34s gated=%s license=%s files=%d downloads=%s" % (i, d.get("gated"), c.get("license"), len(d.get("siblings") or []), d.get("downloads")))
+              except Exception as e:
+                  print("%-34s ERROR %s" % (i, str(e)[:80]))
+          PY
