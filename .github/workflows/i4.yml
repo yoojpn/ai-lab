@@ -1,0 +1,70 @@
+name: i4
+# I4群: 品質を変えずに計算量を下げる。外して問題なかった部品を段階的に重ねて外す。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: c01_free2
+            corpus: wt
+            cfg: '{"N":16000000,"cls":1000,"mixcls":1000,"main":8,"ngh":0,"ngh2":1,"far":1,"bucket":"none"}'
+          - name: c02_noskipA
+            corpus: wt
+            cfg: '{"N":16000000,"cls":1000,"mixcls":1000,"main":8,"ngh":0,"ngh2":1,"far":1,"bucket":"none","skipA":0}'
+          - name: c03_cls_only
+            corpus: wt
+            cfg: '{"N":16000000,"cls":1000,"mixcls":0,"main":8,"ngh":0,"ngh2":1,"far":1,"bucket":"none","skipA":0}'
+          - name: c04_svd16_k200
+            corpus: wt
+            cfg: '{"N":16000000,"cls":200,"mixcls":0,"main":8,"ngh":0,"ngh2":1,"far":1,"bucket":"none","skipA":0,"svd_dim":16}'
+          - name: c05_main5
+            corpus: wt
+            cfg: '{"N":16000000,"cls":200,"mixcls":0,"main":5,"ngh":0,"ngh2":1,"far":1,"bucket":"none","skipA":0,"svd_dim":16}'
+          - name: c06_nocls
+            corpus: wt
+            cfg: '{"N":16000000,"cls":0,"mixcls":0,"main":8,"ngh":0,"ngh2":1,"far":1,"bucket":"none"}'
+          - name: c07_nocls_noskipA
+            corpus: wt
+            cfg: '{"N":16000000,"cls":0,"mixcls":0,"main":8,"ngh":0,"ngh2":1,"far":1,"bucket":"none","skipA":0}'
+          - name: c08_nocls_main5
+            corpus: wt
+            cfg: '{"N":16000000,"cls":0,"mixcls":0,"main":5,"ngh":0,"ngh2":1,"far":1,"bucket":"none","skipA":0}'
+          - name: c09_40M_c04
+            corpus: wt
+            cfg: '{"N":40000000,"cls":200,"mixcls":0,"main":8,"ngh":0,"ngh2":1,"far":1,"bucket":"none","skipA":0,"svd_dim":16}'
+          - name: c10_40M_c05
+            corpus: wt
+            cfg: '{"N":40000000,"cls":200,"mixcls":0,"main":5,"ngh":0,"ngh2":1,"far":1,"bucket":"none","skipA":0,"svd_dim":16}'
+          - name: c11_40M_c08
+            corpus: wt
+            cfg: '{"N":40000000,"cls":0,"mixcls":0,"main":5,"ngh":0,"ngh2":1,"far":1,"bucket":"none","skipA":0}'
+          - name: c12_c04_d095
+            corpus: wt
+            cfg: '{"N":16000000,"cls":200,"mixcls":0,"main":8,"ngh":0,"ngh2":1,"far":1,"bucket":"none","skipA":0,"svd_dim":16,"delta":0.95}'
+          - name: c13_c05_cls500
+            corpus: wt
+            cfg: '{"N":16000000,"cls":500,"mixcls":0,"main":5,"ngh":0,"ngh2":1,"far":1,"bucket":"none","skipA":0,"svd_dim":16}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - if: matrix.corpus == 'wt'
+        run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: |
+          if [ "${{ matrix.corpus }}" = "wt" ]; then LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_i.py '${{ matrix.cfg }}' | tee ../out.log
+          elif [ "${{ matrix.corpus }}" = "code" ]; then LADDER_CORPUS=$RUNNER_TEMP/code.pkl python3 exp_i.py '${{ matrix.cfg }}' | tee ../out.log
+          else python3 exp_k.py | tee ../out.log; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out.log
