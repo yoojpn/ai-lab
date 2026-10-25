@@ -34,6 +34,7 @@ def load(N):
     c.Xva, c.yva, c.mva, c.pva = XF.lwindows_meta(c.va_i, es.N_VAL)
     c.Xte, c.yte, c.mte, c.pte = XF.lwindows_meta(c.te_i, es.N_TEST)
     c.N = N
+    c.vocab = vocab
     return c
 
 

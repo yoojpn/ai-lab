@@ -1,0 +1,65 @@
+name: h
+# H群: 賢さを言語で直接測る(文脈の敏感さ・紛らわしい誤答・当たり率・生成)。数えるモデル/NN/混合を19個並列で。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: c4M
+            cfg: '{"N":4000000}'
+          - name: c16M
+            cfg: '{"N":16000000}'
+          - name: c40M
+            cfg: '{"N":40000000}'
+          - name: c40M_m4
+            cfg: '{"N":40000000,"main":4}'
+          - name: c16M_d075
+            cfg: '{"N":16000000,"delta":0.75}'
+          - name: c16M_nn16_1M
+            cfg: '{"N":16000000,"nn_h":16,"nn_n":1000000}'
+          - name: c16M_nn16_4M
+            cfg: '{"N":16000000,"nn_h":16,"nn_n":4000000}'
+          - name: c16M_nn64_1M
+            cfg: '{"N":16000000,"nn_h":64,"nn_n":1000000}'
+          - name: c16M_nn64_4M
+            cfg: '{"N":16000000,"nn_h":64,"nn_n":4000000}'
+          - name: c16M_nn64_16M
+            cfg: '{"N":16000000,"nn_h":64,"nn_n":16000000}'
+          - name: c16M_nn256_4M
+            cfg: '{"N":16000000,"nn_h":256,"nn_n":4000000}'
+          - name: c40M_nn16_4M
+            cfg: '{"N":40000000,"nn_h":16,"nn_n":4000000}'
+          - name: c40M_nn64_8M
+            cfg: '{"N":40000000,"nn_h":64,"nn_n":8000000}'
+          - name: c40M_nn256_16M
+            cfg: '{"N":40000000,"nn_h":256,"nn_n":16000000}'
+          - name: nn16_4M
+            cfg: '{"N":16000000,"count":0,"nn_h":16,"nn_n":4000000}'
+          - name: nn64_4M
+            cfg: '{"N":16000000,"count":0,"nn_h":64,"nn_n":4000000}'
+          - name: nn256_4M
+            cfg: '{"N":16000000,"count":0,"nn_h":256,"nn_n":4000000}'
+          - name: nn256_16M
+            cfg: '{"N":16000000,"count":0,"nn_h":256,"nn_n":16000000}'
+          - name: nn1024_4M
+            cfg: '{"N":16000000,"count":0,"nn_h":1024,"nn_n":4000000}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: h
+        working-directory: hdc
+        shell: bash
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_h.py '${{ matrix.cfg }}' | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: h-${{ matrix.name }}
+          path: out.log
