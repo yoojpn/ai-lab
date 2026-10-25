@@ -1,0 +1,46 @@
+name: h2
+# H2群: 数える方式とTransformerを混ぜて、両方を超えるかを測る。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: h1_40M_light_tf128
+            corpus: wt
+            cfg: '{"main":5,"skipA":0,"cls":0,"mixcls":0,"ngh2":1,"far":1,"bucket":"none","N":40000000,"tf_d":128,"tf_nl":2,"tf_epochs":1}'
+          - name: h2_40M_full_tf128
+            corpus: wt
+            cfg: '{"cls":1000,"mixcls":1000,"main":8,"ngh2":1,"far":1,"bucket":"none","N":40000000,"tf_d":128,"tf_nl":2,"tf_epochs":1}'
+          - name: h3_16M_light_tf128
+            corpus: wt
+            cfg: '{"main":5,"skipA":0,"cls":0,"mixcls":0,"ngh2":1,"far":1,"bucket":"none","N":16000000,"tf_d":128,"tf_nl":2,"tf_epochs":1}'
+          - name: h4_16M_light_tf192
+            corpus: wt
+            cfg: '{"main":5,"skipA":0,"cls":0,"mixcls":0,"ngh2":1,"far":1,"bucket":"none","N":16000000,"tf_d":192,"tf_nl":3,"tf_epochs":1}'
+          - name: h5_16M_light_tf128_3ep
+            corpus: wt
+            cfg: '{"main":5,"skipA":0,"cls":0,"mixcls":0,"ngh2":1,"far":1,"bucket":"none","N":16000000,"tf_d":128,"tf_nl":2,"tf_epochs":3}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - if: matrix.corpus == 'wt'
+        run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: |
+          if [ "${{ matrix.corpus }}" = "wt" ]; then LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_i.py '${{ matrix.cfg }}' | tee ../out.log
+          elif [ "${{ matrix.corpus }}" = "code" ]; then LADDER_CORPUS=$RUNNER_TEMP/code.pkl python3 exp_i.py '${{ matrix.cfg }}' | tee ../out.log
+          else python3 exp_k.py | tee ../out.log; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out.log

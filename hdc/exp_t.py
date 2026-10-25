@@ -34,6 +34,24 @@ def evaluate(net, X, y):
     return bits(np.concatenate(pt).astype(np.float64))
 
 
+def train_tf(ctx, d, nl, epochs=1, bs=512, lr=2e-3, log_every=None):
+    """窓12語の次語予測でTransformerを学習して返す(混合実験で再利用)"""
+    n = len(ctx.Xtr); net = TF(d, nl)
+    opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=0.0)
+    X = torch.from_numpy(ctx.Xtr); y = torch.from_numpy(ctx.ytr)
+    steps = int(epochs * (n // bs)); st = 0; t0 = time.time()
+    while st < steps:
+        for i in torch.randperm(n).split(bs):
+            if len(i) < bs or st >= steps: break
+            for g in opt.param_groups:
+                g['lr'] = lr * min(1, (st + 1) / 300) * (0.5 * (1 + math.cos(math.pi * st / steps)) * 0.95 + 0.05)
+            loss = torch.nn.functional.cross_entropy(net(X[i]), y[i])
+            opt.zero_grad(); loss.backward(); opt.step(); st += 1
+            if st % 5000 == 0: log('  TF step %d/%d %.0fs' % (st, steps, time.time() - t0))
+    net.eval()
+    return net, time.time() - t0
+
+
 def run(cfg):
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(0)
     ctx = lab.load(cfg['N']); n = len(ctx.Xtr); d, nl = cfg['d'], cfg['nl']

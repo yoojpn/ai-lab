@@ -196,6 +196,21 @@ def run(cfg):
             return np.concatenate(out).astype(np.float64)
         Pv.append(nnp(Xva, yva)); Pt.append(nnp(Xte, yte)); names.append('nn')
         ops['nn_train'] = float(6 * 5576 * cfg['nn_h'] * len(idx))
+    # Transformer(勾配あり)を足す
+    if cfg.get('tf_d'):
+        import exp_t
+        tnet, tsec = exp_t.train_tf(ctx, cfg['tf_d'], cfg['tf_nl'], cfg.get('tf_epochs', 1))
+        def tfp(X, y):
+            out = []
+            with torch.no_grad():
+                for i in range(0, len(X), 4096):
+                    pr = torch.softmax(tnet(torch.from_numpy(X[i:i + 4096])), 1)
+                    out.append(pr[torch.arange(len(pr)), torch.from_numpy(y[i:i + 4096])].numpy())
+            return np.concatenate(out).astype(np.float64)
+        ptv, ptt = tfp(Xva, yva), tfp(Xte, yte)
+        res['tf_alone'] = bits(ptt); res['tf_train_sec'] = tsec
+        Pv.append(ptv); Pt.append(ptt); names.append('tf')
+        log('Transformer単独 %.4f (学習%.0fs)' % (res['tf_alone'], tsec))
     # 混ぜる
     bk = cfg.get('bucket', 'none')
     bv = bt = None
