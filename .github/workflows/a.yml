@@ -1,0 +1,102 @@
+name: a
+# A群: これまでの案の残り(組み合わせの傾き, 幅の拡大, SOAP, 発火の疎さ, 語彙の併合, 文章+コードの混合)
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: a01_recipe_ep1.5
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"init":"ppmi","hemb":18,"sched":"wsd","ema":0.999,"opt":"muon","ffn":"pkm","resid":1,"epochs":1.5}'
+            r: ''
+          - name: a02_recipe_ep6
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"init":"ppmi","hemb":18,"sched":"wsd","ema":0.999,"opt":"muon","ffn":"pkm","resid":1,"epochs":6}'
+            r: ''
+          - name: a03_base_ep12
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"epochs":12}'
+            r: ''
+          - name: a04_d256_base
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":256,"epochs":3}'
+            r: ''
+          - name: a05_d256_recipe
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"init":"ppmi","hemb":18,"sched":"wsd","ema":0.999,"opt":"muon","ffn":"pkm","resid":1,"d":256,"epochs":3}'
+            r: ''
+          - name: a06_soap
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"opt":"soap"}'
+            r: ''
+          - name: a07_sparse
+            corpus: wt
+            script: exp_sparse.py
+            cfg: '{"N":16000000,"epochs":3}'
+            r: ''
+          - name: a08_vm_base
+            corpus: wt
+            script: exp_vm.py
+            cfg: '{"N":16000000,"M":0,"steps":5766}'
+            r: ''
+          - name: a09_vm_merge_eqflop
+            corpus: wt
+            script: exp_vm.py
+            cfg: '{"N":16000000,"M":999,"steps":5766}'
+            r: ''
+          - name: a10_vm_merge_ep3
+            corpus: wt
+            script: exp_vm.py
+            cfg: '{"N":16000000,"M":999,"epochs":3}'
+            r: ''
+          - name: a11_mix00
+            corpus: mix
+            script: exp_y.py
+            cfg: '{"N":16000000,"extra_tests":[3]}'
+            r: '0'
+          - name: a12_mix10
+            corpus: mix
+            script: exp_y.py
+            cfg: '{"N":16000000,"extra_tests":[3]}'
+            r: '0.1'
+          - name: a13_mix30
+            corpus: mix
+            script: exp_y.py
+            cfg: '{"N":16000000,"extra_tests":[3]}'
+            r: '0.3'
+          - name: a14_mix50
+            corpus: mix
+            script: exp_y.py
+            cfg: '{"N":16000000,"extra_tests":[3]}'
+            r: '0.5'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - if: matrix.corpus == 'wt' || matrix.corpus == 'mix'
+        run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - if: matrix.corpus == 'mix'
+        run: python3 hdc/make_mix.py $RUNNER_TEMP/wt.pkl $RUNNER_TEMP/mix.pkl ${{ matrix.r }} 16000000
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: |
+          if [ "${{ matrix.corpus }}" = "mix" ]; then LADDER_CORPUS=$RUNNER_TEMP/mix.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log
+          else LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out.log

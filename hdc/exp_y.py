@@ -173,6 +173,41 @@ class Muon:
         for p in s.p: p.grad = None
 
 
+class SOAP:
+    """簡略版SOAP: 行列の左右の共分散(Shampoo型)の固有基底でAdamを回す。固有基底は freq ステップごとに更新(モーメントの回転は省略)"""
+    def __init__(s, params, lr, b1=0.9, b2=0.99, bs=0.95, freq=10, eps=1e-8):
+        s.p = params; s.lr = lr; s.b1, s.b2, s.bs, s.freq, s.eps = b1, b2, bs, freq, eps; s.st = {}
+
+    def step(s):
+        for p in s.p:
+            if p.grad is None: continue
+            g = p.grad.float(); st = s.st.get(id(p))
+            if st is None:
+                m, n = g.shape
+                st = dict(t=0, L=torch.zeros(m, m), R=torch.zeros(n, n), QL=torch.eye(m), QR=torch.eye(n), m=torch.zeros_like(g), v=torch.zeros_like(g)); s.st[id(p)] = st
+            st['t'] += 1; t = st['t']
+            st['L'].mul_(s.bs).add_(g @ g.T, alpha=1 - s.bs); st['R'].mul_(s.bs).add_(g.T @ g, alpha=1 - s.bs)
+            if t == 1 or t % s.freq == 0:
+                st['QL'] = torch.linalg.eigh(st['L'] + 1e-6 * torch.eye(len(st['L'])))[1]
+                st['QR'] = torch.linalg.eigh(st['R'] + 1e-6 * torch.eye(len(st['R'])))[1]
+            gr = st['QL'].T @ g @ st['QR']
+            st['m'].mul_(s.b1).add_(gr, alpha=1 - s.b1); st['v'].mul_(s.b2).addcmul_(gr, gr, value=1 - s.b2)
+            u = (st['m'] / (1 - s.b1 ** t)) / ((st['v'] / (1 - s.b2 ** t)).sqrt() + s.eps)
+            p.data.add_((st['QL'] @ u @ st['QR'].T).to(p.dtype), alpha=-s.lr)
+
+    def zero_grad(s):
+        for p in s.p: p.grad = None
+
+
+def make_windows(docs, n, seq):
+    tot = sum(len(d) - 1 for d in docs); idx = np.linspace(0, tot - 1, n).astype(np.int64)
+    cum = np.cumsum([len(d) - 1 for d in docs]); X = np.zeros((n, seq), np.int64); y = np.zeros(n, np.int64)
+    for q, i in enumerate(idx):
+        j = int(np.searchsorted(cum, i, side='right')); off = int(i - (cum[j - 1] if j else 0)) + 1
+        d = docs[j]; seg = d[max(0, off - seq):off]; X[q, seq - len(seg):] = seg; y[q] = d[off]
+    return torch.from_numpy(X), torch.from_numpy(y)
+
+
 def run(cfg):
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(0)
     ctx = lab.load(cfg['N']); d, nl, seq = cfg.get('d', 128), cfg.get('nl', 4), cfg.get('seq', 64); S = seq + 1
@@ -201,7 +236,11 @@ def run(cfg):
         tab = build_ret(stream); xs = chunks[:, :-1].numpy(); ys = chunks[:, 1:].numpy()
         FRtr = ret_feat(tab, xs, ys); FRte = ret_feat(tab, split_windows(ctx.te_i, ctx.mte, ctx.pte, 20000, seq))
         log('ret特徴 作成 (自分を除く3-gramの最頻次語) 有効率 %.3f' % (FRtr[0] > 0).float().mean())
-    if cfg.get('opt', 'adamw') == 'muon':
+    if cfg.get('opt', 'adamw') == 'soap':
+        mp = [p for n_, p in net.layers.named_parameters() if p.ndim == 2]; mid = {id(p) for p in mp}
+        rest = [p for p in net.parameters() if id(p) not in mid]
+        opts = [SOAP(mp, lr), torch.optim.AdamW(rest, lr=lr, weight_decay=0.0)]
+    elif cfg.get('opt', 'adamw') == 'muon':
         mp = [p for n_, p in net.layers.named_parameters() if p.ndim == 2]; mid = {id(p) for p in mp}
         rest = [p for p in net.parameters() if id(p) not in mid]
         opts = [Muon(mp, lr), torch.optim.AdamW(rest, lr=lr, weight_decay=0.0)]
@@ -220,7 +259,13 @@ def run(cfg):
     macs = body + {'full': d * V, 'hier': d * (C + VC), 'samp': d * (K + 1)}[head]
     steps = int(cfg.get('epochs', 3) * (M // bs)); nev = 10; every = max(1, steps // nev)
     yte = ctx.yte[:20000]; Xte = torch.from_numpy(split_windows(ctx.te_i, ctx.mte, ctx.pte, len(yte), seq)); yt = torch.from_numpy(yte)
-    curve = []; flops = 0.0; st = 0; ttrain = 0.0
+    curve = []; flops = 0.0; st = 0; ttrain = 0.0; extra_last = {}
+    extra = {}
+    if cfg.get('extra_tests'):
+        import pickle
+        corp = pickle.load(open(es.CACHE, 'rb'))
+        for k in cfg['extra_tests']:
+            docs = [np.array([ctx.vocab.get(t, 0) for t in m], np.int64) for m in corp[k]]; extra[k] = make_windows(docs, 20000, seq)
 
     def evaluate():
         net.eval(); backup = None
@@ -236,6 +281,13 @@ def run(cfg):
                     out.append(torch.log_softmax(z, 1)[torch.arange(len(z)), yt[i:i + 1024]].exp().numpy())
                 else:
                     out.append(net.logp_true(h, yt[i:i + 1024]).exp().numpy())
+        if extra:
+            with torch.no_grad():
+                for k_, (Xe, ye) in extra.items():
+                    oe = []
+                    for i in range(0, len(Xe), 1024):
+                        he = net.hidden(Xe[i:i + 1024])[:, -1]; oe.append(net.logp_true(he, ye[i:i + 1024]).exp().numpy())
+                    extra_last[k_] = bits(np.concatenate(oe).astype(np.float64))
         if backup is not None: net.load_state_dict(backup)
         net.train(); return bits(np.concatenate(out).astype(np.float64))
     log('params %d macs/語 %.3e chunks %d steps %d' % (params, macs, M, steps))
@@ -245,7 +297,7 @@ def run(cfg):
             t = time.time(); fr = st / steps; w = min(1, (st + 1) / 300)
             f = (0.5 * (1 + math.cos(math.pi * fr)) * 0.95 + 0.05) if sched == 'cos' else (1.0 if fr < 0.8 else max(0.05, 1 - (fr - 0.8) / 0.2))
             for o in opts:
-                if isinstance(o, Muon): o.lr = lr * w * f
+                if isinstance(o, (Muon, SOAP)): o.lr = lr * w * f
                 else:
                     for g in o.param_groups: g['lr'] = lr * w * f * g.get('scale', 1.0)
             b = chunks[i]; x, y = b[:, :-1], b[:, 1:]
@@ -287,8 +339,10 @@ def run(cfg):
             if st % every == 0 or st == steps:
                 bb = evaluate(); curve.append((st, round(ttrain, 1), float('%.3e' % flops), round(bb, 4)))
                 log('step %d 学習時間 %.0fs FLOP %.2e bit/語 %.4f' % (st, ttrain, flops, bb))
-    res = dict(cfg=cfg, params=params, curve=curve, final_bits=curve[-1][3], flops=flops, train_sec=ttrain)
+    res = dict(cfg=cfg, params=params, curve=curve, final_bits=curve[-1][3], flops=flops, train_sec=ttrain, extra_bits={str(k): v for k, v in extra_last.items()})
+    log('extra ' + json.dumps(res['extra_bits']))
     log('RESULT ' + json.dumps(res))
+    return net, Xte, yt
 
 
 if __name__ == '__main__':
