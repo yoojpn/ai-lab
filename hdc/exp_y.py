@@ -191,10 +191,11 @@ def run(cfg):
     order = np.argsort(-cnt, kind='stable'); rank = np.empty(V, np.int64); rank[order] = np.arange(V)
     qd = ((cnt + 1) ** 0.75); qd = (qd / qd.sum()).astype(np.float32)
     net = XT(d, nl, S, cfg, rank, qd)
+    if cfg.get('resid'): net.a = torch.nn.Parameter(torch.ones(1))
     if cfg.get('init') == 'ppmi':
         E0 = items.ppmi_embeddings(ctx, d); E0 = E0 / (E0.std() + 1e-9)
         net.E.weight.data.copy_(torch.from_numpy(E0.astype(np.float32)))
-    pr = Prior(stream) if (eps > 0 or rho > 0) else None
+    pr = Prior(stream) if (eps > 0 or rho > 0 or cfg.get('resid')) else None
     FRtr = None; FRte = None
     if cfg.get('ret'):
         tab = build_ret(stream); xs = chunks[:, :-1].numpy(); ys = chunks[:, 1:].numpy()
@@ -230,7 +231,11 @@ def run(cfg):
             for i in range(0, len(Xte), 1024):
                 fr = None if FRte is None else (FRte[0][i:i + 1024], FRte[1][i:i + 1024])
                 h = net.hidden(Xte[i:i + 1024], fr)[:, -1]
-                out.append(net.logp_true(h, yt[i:i + 1024]).exp().numpy())
+                if cfg.get('resid'):
+                    z = net.out(h) + net.a * pr.logp(Xte[i:i + 1024, -1])
+                    out.append(torch.log_softmax(z, 1)[torch.arange(len(z)), yt[i:i + 1024]].exp().numpy())
+                else:
+                    out.append(net.logp_true(h, yt[i:i + 1024]).exp().numpy())
         if backup is not None: net.load_state_dict(backup)
         net.train(); return bits(np.concatenate(out).astype(np.float64))
     log('params %d macs/語 %.3e chunks %d steps %d' % (params, macs, M, steps))
@@ -256,6 +261,7 @@ def run(cfg):
                 tok = -net.logp_true(h, yf)
             else:
                 lg = net.out(h)
+                if cfg.get('resid'): lg = lg + net.a * pr.logp(x.reshape(-1), yf)
                 if eps > 0:
                     pb = pr.logp(x.reshape(-1), yf).exp()
                     tok = -(((1 - eps) * F.one_hot(yf, V).float() + eps * pb) * torch.log_softmax(lg, 1)).sum(1)

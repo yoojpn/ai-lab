@@ -6,7 +6,7 @@ import exp_y
 from lab import log
 cfg0 = json.loads(sys.argv[1]); out = {}
 for mup in (0, 1):
-    for lr in (1e-3, 2e-3, 4e-3, 8e-3):
+    for lr in (4e-3, 8e-3, 1.6e-2, 3.2e-2):
         c = dict(cfg0, lr=lr, mup=mup, epochs=1)
         import io, contextlib
         try:
