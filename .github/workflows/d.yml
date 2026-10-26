@@ -1,5 +1,5 @@
 name: d
-# D群: データ効率。学習曲線と頻度帯ごとの損失(d0)、データを節約する工夫6種(d1)。
+# I群: 勾配ゼロで「教えていないこと」を引き出す20実験(文献: infini-gram, n-gram heads/induction)。
 on:
   workflow_dispatch:
 jobs:
@@ -10,25 +10,37 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {m: d0, n: 16000000, l: base}
-          - {m: d1, n: 4000000, l: base}
-          - {m: d1, n: 4000000, l: mt}
-          - {m: d1, n: 4000000, l: ep3}
-          - {m: d1, n: 4000000, l: hard}
-          - {m: d1, n: 4000000, l: aug}
-          - {m: d1, n: 4000000, l: mtaug}
+          - name: d1_gen
+            corpus: wt
+            script: exp_h.py
+            cfg: '{"N":16000000,"main":4,"nq":3000}'
+          - name: d2_hash100M
+            corpus: wt
+            script: exp_hash.py
+            cfg: '{"N":45000000}'
+          - name: d3_code_c
+            corpus: code
+            script: exp_i.py
+            cfg: '{"N":3000000,"main":5,"ngh2":1,"far":1,"trig":1,"rfr_D":1024}'
+          - name: d4_wt40_c
+            corpus: wt
+            script: exp_i.py
+            cfg: '{"N":40000000,"main":5,"ngh2":1,"far":1,"trig":1,"rfr_D":2048}'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
-      - run: python3 hdc/prep_wikitext.py ${{ matrix.n }} $RUNNER_TEMP/wt.pkl
-      - name: 実験
+      - if: matrix.corpus == 'wt'
+        run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: run
         working-directory: hdc
         shell: bash
-        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_d.py ${{ matrix.m }} ${{ matrix.n }} ${{ matrix.l }} | tee ../out.log
+        run: |
+          if [ "${{ matrix.corpus }}" = "wt" ]; then LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log
+          else LADDER_CORPUS=$RUNNER_TEMP/code.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log; fi
       - uses: actions/upload-artifact@v4
         with:
-          name: d-${{ matrix.m }}-${{ matrix.l }}
+          name: ${{ matrix.name }}
           path: out.log
