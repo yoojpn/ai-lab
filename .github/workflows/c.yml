@@ -1,0 +1,46 @@
+name: c
+# I群: 勾配ゼロで「教えていないこと」を引き出す20実験(文献: infini-gram, n-gram heads/induction)。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: c01_base
+            corpus: wt
+            cfg: '{"N":16000000,"main":5,"ngh2":1,"far":1}'
+          - name: c02_trig
+            corpus: wt
+            cfg: '{"N":16000000,"main":5,"ngh2":1,"far":1,"trig":1}'
+          - name: c03_rfr512
+            corpus: wt
+            cfg: '{"N":16000000,"main":5,"ngh2":1,"far":1,"rfr_D":512}'
+          - name: c04_rfr2048
+            corpus: wt
+            cfg: '{"N":16000000,"main":5,"ngh2":1,"far":1,"rfr_D":2048}'
+          - name: c05_both
+            corpus: wt
+            cfg: '{"N":16000000,"main":5,"ngh2":1,"far":1,"trig":1,"rfr_D":2048}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - if: matrix.corpus == 'wt'
+        run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: |
+          if [ "${{ matrix.corpus }}" = "wt" ]; then LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_i.py '${{ matrix.cfg }}' | tee ../out.log
+          elif [ "${{ matrix.corpus }}" = "code" ]; then LADDER_CORPUS=$RUNNER_TEMP/code.pkl python3 exp_i.py '${{ matrix.cfg }}' | tee ../out.log
+          else python3 exp_k.py | tee ../out.log; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out.log

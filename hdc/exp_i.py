@@ -221,6 +221,19 @@ def run(cfg):
         res['tfc_alone'] = bits(ptt); res['tfc_sec'] = tsec; res['tfc_flops'] = tfl
         Pv.append(ptv); Pt.append(ptt); names.append('tfc')
         log('因果Transformer単独 %.4f (学習%.0fs, %.2e FLOP)' % (res['tfc_alone'], tsec, tfl))
+    # 閉形式・1パスの汎化部品
+    if cfg.get('trig'):
+        import exp_c
+        pv, pt_, o, info = exp_c.trig(ctx, Xva, yva, Xte, yte, pu)
+        res['trig_alone'] = bits(pt_); res['trig_info'] = info; ops['trig'] = o; Pv.append(pv); Pt.append(pt_); names.append('trig')
+        log('trig単独 %.4f' % res['trig_alone'])
+    if cfg.get('rfr_D'):
+        import exp_c
+        if E0 is None or E0.shape[1] != 32:
+            E0 = items.ppmi_embeddings(ctx, 32); ops['svd32'] = float(2 * V * V * 32 * 7 + 22 * N + 10 * V * V)
+        pv, pt_, o, info = exp_c.rfr(ctx, E0, Xva, yva, Xte, yte, D=cfg['rfr_D'])
+        res['rfr_alone'] = bits(pt_); res['rfr_info'] = info; ops['rfr'] = o; Pv.append(pv); Pt.append(pt_); names.append('rfr')
+        log('rfr単独 %.4f' % res['rfr_alone'])
     # 混ぜる
     bk = cfg.get('bucket', 'none')
     bv = bt = None
