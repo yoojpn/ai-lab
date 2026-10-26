@@ -1,0 +1,67 @@
+name: t4
+# T4群: 学習の無駄を削る「てこ」(難しい塊だけ学ぶ/層を育てる/学習率)を、学習FLOP vs bit/語で測る。実測時間 vs bit/語。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: s01_all_ep3
+            corpus: wt
+            cfg: '{"N":16000000,"d":128,"nl":4,"seq":64,"epochs":3}'
+          - name: s02_all_ep6
+            corpus: wt
+            cfg: '{"N":16000000,"d":128,"nl":4,"seq":64,"epochs":6}'
+          - name: s03_random30_ep10
+            corpus: wt
+            cfg: '{"N":16000000,"d":128,"nl":4,"seq":64,"epochs":10,"select":"random","keep":0.3}'
+          - name: s04_hard30_ep10
+            corpus: wt
+            cfg: '{"N":16000000,"d":128,"nl":4,"seq":64,"epochs":10,"select":"hard","keep":0.3}'
+          - name: s05_hard50_ep6
+            corpus: wt
+            cfg: '{"N":16000000,"d":128,"nl":4,"seq":64,"epochs":6,"select":"hard","keep":0.5}'
+          - name: s06_hard20_ep15
+            corpus: wt
+            cfg: '{"N":16000000,"d":128,"nl":4,"seq":64,"epochs":15,"select":"hard","keep":0.2}'
+          - name: s07_grow_all_ep3
+            corpus: wt
+            cfg: '{"N":16000000,"d":128,"nl":4,"seq":64,"epochs":3,"grow":1}'
+          - name: s08_grow_hard30_ep10
+            corpus: wt
+            cfg: '{"N":16000000,"d":128,"nl":4,"seq":64,"epochs":10,"select":"hard","keep":0.3,"grow":1}'
+          - name: s09_lr4e3_ep3
+            corpus: wt
+            cfg: '{"N":16000000,"d":128,"nl":4,"seq":64,"epochs":3,"lr":0.004}'
+          - name: s10_bs512_lr4e3_ep3
+            corpus: wt
+            cfg: '{"N":16000000,"d":128,"nl":4,"seq":64,"epochs":3,"bs":512,"lr":0.004}'
+          - name: s11_hard30_ep5
+            corpus: wt
+            cfg: '{"N":16000000,"d":128,"nl":4,"seq":64,"epochs":5,"select":"hard","keep":0.3}'
+          - name: s12_random30_ep5
+            corpus: wt
+            cfg: '{"N":16000000,"d":128,"nl":4,"seq":64,"epochs":5,"select":"random","keep":0.3}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - if: matrix.corpus == 'wt'
+        run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: |
+          if [ "${{ matrix.corpus }}" = "wt" ]; then LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_t4.py '${{ matrix.cfg }}' | tee ../out.log
+          elif [ "${{ matrix.corpus }}" = "code" ]; then LADDER_CORPUS=$RUNNER_TEMP/code.pkl python3 exp_t4.py '${{ matrix.cfg }}' | tee ../out.log
+          else python3 exp_k.py | tee ../out.log; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out.log
