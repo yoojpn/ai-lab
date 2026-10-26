@@ -1,0 +1,54 @@
+name: z
+# I群: 勾配ゼロで「教えていないこと」を引き出す20実験(文献: infini-gram, n-gram heads/induction)。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: z1_store
+            corpus: wt
+            script: exp_s.py
+            cfg: '{"N":40000000,"tf_runs":[[16000000,3],[40000000,3]],"stores":[4000000,16000000,40000000]}'
+          - name: z2_hemb12
+            corpus: wt
+            script: exp_x.py
+            cfg: '{"N":16000000,"hemb":12}'
+          - name: z3_hemb15
+            corpus: wt
+            script: exp_x.py
+            cfg: '{"N":16000000,"hemb":15}'
+          - name: z4_hemb18
+            corpus: wt
+            script: exp_x.py
+            cfg: '{"N":16000000,"hemb":18}'
+          - name: z5_hemb20
+            corpus: wt
+            script: exp_x.py
+            cfg: '{"N":16000000,"hemb":20}'
+          - name: z6_recall
+            corpus: wt
+            script: exp_c64.py
+            cfg: '{"N":16000000,"nq":3000}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - if: matrix.corpus == 'wt'
+        run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: |
+          if [ "${{ matrix.corpus }}" = "wt" ]; then LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log
+          else LADDER_CORPUS=$RUNNER_TEMP/code.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out.log
