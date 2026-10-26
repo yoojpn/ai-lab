@@ -1,0 +1,70 @@
+name: x
+# I群: 勾配ゼロで「教えていないこと」を引き出す20実験(文献: infini-gram, n-gram heads/induction)。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x00_base
+            corpus: wt
+            script: exp_x.py
+            cfg: '{"N":16000000}'
+          - name: x01_muon
+            corpus: wt
+            script: exp_x.py
+            cfg: '{"N":16000000,"opt":"muon"}'
+          - name: x02_hier
+            corpus: wt
+            script: exp_x.py
+            cfg: '{"N":16000000,"head":"hier"}'
+          - name: x03_samp
+            corpus: wt
+            script: exp_x.py
+            cfg: '{"N":16000000,"head":"samp","K":512}'
+          - name: x04_hemb17
+            corpus: wt
+            script: exp_x.py
+            cfg: '{"N":16000000,"hemb":17}'
+          - name: x05_soft03
+            corpus: wt
+            script: exp_x.py
+            cfg: '{"N":16000000,"soft":0.3}'
+          - name: x06_wsd_ema
+            corpus: wt
+            script: exp_x.py
+            cfg: '{"N":16000000,"sched":"wsd","ema":0.999}'
+          - name: x07_rho06
+            corpus: wt
+            script: exp_x.py
+            cfg: '{"N":16000000,"rho":0.6}'
+          - name: x08_ind
+            corpus: wt
+            script: exp_x.py
+            cfg: '{"N":16000000,"ind":1}'
+          - name: x09_ppmi
+            corpus: wt
+            script: exp_x.py
+            cfg: '{"N":16000000,"init":"ppmi"}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - if: matrix.corpus == 'wt'
+        run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: |
+          if [ "${{ matrix.corpus }}" = "wt" ]; then LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log
+          else LADDER_CORPUS=$RUNNER_TEMP/code.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out.log
