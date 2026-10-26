@@ -1,0 +1,46 @@
+name: v
+# V群: 数える方式(軽い)＋普通のLLMの学び方(文脈128語)のTransformer。TransformerのFLOP当たりの品質を、単独(T3群)と比べる。
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: v1_d64l2_ep3
+            corpus: wt
+            cfg: '{"N":40000000,"main":5,"skipA":0,"cls":0,"mixcls":0,"ngh2":1,"far":1,"bucket":"none","tfc_seq":128,"tfc_d":64,"tfc_nl":2,"tfc_epochs":3}'
+          - name: v2_d128l2_ep1
+            corpus: wt
+            cfg: '{"N":40000000,"main":5,"skipA":0,"cls":0,"mixcls":0,"ngh2":1,"far":1,"bucket":"none","tfc_seq":128,"tfc_d":128,"tfc_nl":2,"tfc_epochs":1}'
+          - name: v3_d128l2_ep3
+            corpus: wt
+            cfg: '{"N":40000000,"main":5,"skipA":0,"cls":0,"mixcls":0,"ngh2":1,"far":1,"bucket":"none","tfc_seq":128,"tfc_d":128,"tfc_nl":2,"tfc_epochs":3}'
+          - name: v4_d192l3_ep3
+            corpus: wt
+            cfg: '{"N":40000000,"main":5,"skipA":0,"cls":0,"mixcls":0,"ngh2":1,"far":1,"bucket":"none","tfc_seq":128,"tfc_d":192,"tfc_nl":3,"tfc_epochs":3}'
+          - name: v5_d256l4_ep1
+            corpus: wt
+            cfg: '{"N":40000000,"main":5,"skipA":0,"cls":0,"mixcls":0,"ngh2":1,"far":1,"bucket":"none","tfc_seq":128,"tfc_d":256,"tfc_nl":4,"tfc_epochs":1}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - if: matrix.corpus == 'wt'
+        run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: |
+          if [ "${{ matrix.corpus }}" = "wt" ]; then LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_i.py '${{ matrix.cfg }}' | tee ../out.log
+          elif [ "${{ matrix.corpus }}" = "code" ]; then LADDER_CORPUS=$RUNNER_TEMP/code.pkl python3 exp_i.py '${{ matrix.cfg }}' | tee ../out.log
+          else python3 exp_k.py | tee ../out.log; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out.log

@@ -48,6 +48,48 @@ def evaluate(net, X, y):
     return bits(np.concatenate(pt).astype(np.float64))
 
 
+def split_windows(docs, mid, pos, n, seq):
+    X = np.zeros((n, seq), np.int64)
+    for q in range(n):
+        a = docs[mid[q]]; p = int(pos[q]); lo = max(0, p - seq)
+        seg = a[lo:p]; X[q, seq - len(seg):] = seg
+    return X
+
+
+def flops_train(d, nl, tokens, seq):
+    """学習FLOP = 3(順+逆) x 2(積和) x 1語あたりの積和。1語あたり: 層 12d^2 + 注意 seq*d(平均) + 出力 d*V"""
+    macs = nl * (12 * d * d + seq * d) + d * V
+    return 6.0 * macs * tokens
+
+
+def train_causal(ctx, d, nl, epochs, seq, bs=128, lr=2e-3):
+    S = seq + 1
+    stream = np.concatenate([a for a in ctx.tr_i])[:len(ctx.ytr)]
+    M = len(stream) // S; chunks = torch.from_numpy(stream[:M * S].reshape(M, S).astype(np.int64))
+    net = CTF(d, nl, seq=S); opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=0.0)
+    steps = int(epochs * (M // bs)); st = 0; t0 = time.time()
+    while st < steps:
+        for i in torch.randperm(M).split(bs):
+            if len(i) < bs or st >= steps: break
+            for g in opt.param_groups:
+                g['lr'] = lr * min(1, (st + 1) / 300) * (0.5 * (1 + math.cos(math.pi * st / steps)) * 0.95 + 0.05)
+            b = chunks[i]
+            loss = torch.nn.functional.cross_entropy(net(b[:, :-1]).reshape(-1, V), b[:, 1:].reshape(-1))
+            opt.zero_grad(); loss.backward(); opt.step(); st += 1
+            if st % 2000 == 0: log('  TFc step %d/%d %.0fs' % (st, steps, time.time() - t0))
+    net.eval()
+    return net, time.time() - t0, flops_train(d, nl, steps * bs * seq, seq)
+
+
+def probs_of(net, X, y):
+    out = []
+    with torch.no_grad():
+        for i in range(0, len(X), 1024):
+            lp = torch.log_softmax(net(torch.from_numpy(X[i:i + 1024]), last_only=True), 1)
+            out.append(lp[torch.arange(len(lp)), torch.from_numpy(y[i:i + 1024])].exp().numpy())
+    return np.concatenate(out).astype(np.float64)
+
+
 def run(cfg):
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(0)
     ctx = lab.load(cfg['N']); d, nl = cfg['d'], cfg['nl']; bs = cfg.get('bs', 128); lr = cfg.get('lr', 2e-3)

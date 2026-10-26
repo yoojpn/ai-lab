@@ -211,6 +211,16 @@ def run(cfg):
         res['tf_alone'] = bits(ptt); res['tf_train_sec'] = tsec
         Pv.append(ptv); Pt.append(ptt); names.append('tf')
         log('Transformer単独 %.4f (学習%.0fs)' % (res['tf_alone'], tsec))
+    # 普通のLLMの学び方(全位置学習)のTransformerを足す(文脈 seq 語)
+    if cfg.get('tfc_d'):
+        import exp_t3
+        seq = cfg.get('tfc_seq', 128)
+        tnet, tsec, tfl = exp_t3.train_causal(ctx, cfg['tfc_d'], cfg['tfc_nl'], cfg.get('tfc_epochs', 1), seq)
+        Xv = exp_t3.split_windows(ctx.va_i, ctx.mva[:nv], ctx.pva[:nv], nv, seq); Xt = exp_t3.split_windows(ctx.te_i, ctx.mte[sl], ctx.pte[sl], nt, seq)
+        ptv, ptt = exp_t3.probs_of(tnet, Xv, yva), exp_t3.probs_of(tnet, Xt, yte)
+        res['tfc_alone'] = bits(ptt); res['tfc_sec'] = tsec; res['tfc_flops'] = tfl
+        Pv.append(ptv); Pt.append(ptt); names.append('tfc')
+        log('因果Transformer単独 %.4f (学習%.0fs, %.2e FLOP)' % (res['tfc_alone'], tsec, tfl))
     # 混ぜる
     bk = cfg.get('bucket', 'none')
     bv = bt = None
