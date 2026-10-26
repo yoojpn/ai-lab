@@ -1,5 +1,5 @@
 name: r
-# R群: 検索を学習に組み込む(RNet)の条件振り。索引の大きさ、NNの大きさ、近傍の数、鍵、部品の外し、NNの学習量。
+# I群: 勾配ゼロで「教えていないこと」を引き出す20実験(文献: infini-gram, n-gram heads/induction)。
 on:
   workflow_dispatch:
 jobs:
@@ -10,34 +10,37 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {n: 4000000, tag: 'midx8000000', cfg: '{"midx": 8000000}'}
-          - {n: 4000000, tag: 'midx64000000', cfg: '{"midx": 64000000}'}
-          - {n: 4000000, tag: 'H32', cfg: '{"H": 32}'}
-          - {n: 4000000, tag: 'H64', cfg: '{"H": 64}'}
-          - {n: 4000000, tag: 'H128', cfg: '{"H": 128}'}
-          - {n: 4000000, tag: 'H512', cfg: '{"H": 512}'}
-          - {n: 4000000, tag: 'K4', cfg: '{"K": 4}'}
-          - {n: 4000000, tag: 'K64', cfg: '{"K": 64}'}
-          - {n: 4000000, tag: 'keyk5', cfg: '{"key": "k5"}'}
-          - {n: 4000000, tag: 'keym8', cfg: '{"key": "m8"}'}
-          - {n: 4000000, tag: 'ablnogate', cfg: '{"abl": "nogate"}'}
-          - {n: 4000000, tag: 'ablnofeat', cfg: '{"abl": "nofeat"}'}
-          - {n: 4000000, tag: 'ablnoboost', cfg: '{"abl": "noboost"}'}
-          - {n: 16000000, tag: 'H256', cfg: '{"H": 256}'}
+          - name: r1_none_lr2
+            corpus: wt
+            script: exp_r.py
+            cfg: '{"N":16000000,"d":128,"nl":4,"seq":64,"epochs":3,"lr":0.002,"prior":"none"}'
+          - name: r2_bi_lr2
+            corpus: wt
+            script: exp_r.py
+            cfg: '{"N":16000000,"d":128,"nl":4,"seq":64,"epochs":3,"lr":0.002,"prior":"bi"}'
+          - name: r3_none_lr4
+            corpus: wt
+            script: exp_r.py
+            cfg: '{"N":16000000,"d":128,"nl":4,"seq":64,"epochs":3,"lr":0.004,"prior":"none"}'
+          - name: r4_bi_lr4
+            corpus: wt
+            script: exp_r.py
+            cfg: '{"N":16000000,"d":128,"nl":4,"seq":64,"epochs":3,"lr":0.004,"prior":"bi"}'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install numpy pandas pyarrow scipy faiss-cpu torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
-      - run: python3 hdc/prep_wikitext.py 64000000 $RUNNER_TEMP/wt.pkl
-      - name: R
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - if: matrix.corpus == 'wt'
+        run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: run
         working-directory: hdc
         shell: bash
-        env:
-          CFG: ${{ matrix.cfg }}
-        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_p.py p10 ${{ matrix.n }} "$CFG" | tee ../out.log
+        run: |
+          if [ "${{ matrix.corpus }}" = "wt" ]; then LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log
+          else LADDER_CORPUS=$RUNNER_TEMP/code.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log; fi
       - uses: actions/upload-artifact@v4
         with:
-          name: r-${{ strategy.job-index }}
+          name: ${{ matrix.name }}
           path: out.log
