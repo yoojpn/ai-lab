@@ -1,5 +1,5 @@
 name: f
-# F群: 勾配ゼロのモデル(数える+文書内キャッシュ+索引、重みだけEM)。学習の計算量が桁違いに小さいときの品質。
+# F群: attentionの射影を小さくできるか。検索キー(Q,K)の合計次元rと値(V,O)の次元rvを絞り、幅dを変えて、必要なrがdに比例するかを見る
 on:
   workflow_dispatch:
 jobs:
@@ -9,19 +9,119 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        n: [32000000]
+        include:
+          - name: f_ctrl_d64
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":64,"epochs":2,"att":[64,64]}'
+            r: ''
+          - name: f_ctrl_d128
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":128,"epochs":2,"att":[128,128]}'
+            r: ''
+          - name: f_ctrl_d256
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":256,"epochs":2,"att":[256,256]}'
+            r: ''
+          - name: f_qk8_d64
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":64,"epochs":2,"att":[8,64]}'
+            r: ''
+          - name: f_qk16_d64
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":64,"epochs":2,"att":[16,64]}'
+            r: ''
+          - name: f_qk32_d64
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":64,"epochs":2,"att":[32,64]}'
+            r: ''
+          - name: f_qk8_d128
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":128,"epochs":2,"att":[8,128]}'
+            r: ''
+          - name: f_qk16_d128
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":128,"epochs":2,"att":[16,128]}'
+            r: ''
+          - name: f_qk32_d128
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":128,"epochs":2,"att":[32,128]}'
+            r: ''
+          - name: f_qk64_d128
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":128,"epochs":2,"att":[64,128]}'
+            r: ''
+          - name: f_qk8_d256
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":256,"epochs":2,"att":[8,256]}'
+            r: ''
+          - name: f_qk16_d256
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":256,"epochs":2,"att":[16,256]}'
+            r: ''
+          - name: f_qk32_d256
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":256,"epochs":2,"att":[32,256]}'
+            r: ''
+          - name: f_qk64_d256
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":256,"epochs":2,"att":[64,256]}'
+            r: ''
+          - name: f_qk128_d256
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":256,"epochs":2,"att":[128,256]}'
+            r: ''
+          - name: f_vo32_d128
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":128,"epochs":2,"att":[128,32]}'
+            r: ''
+          - name: f_vo16_d128
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":128,"epochs":2,"att":[128,16]}'
+            r: ''
+          - name: f_vo64_d256
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":256,"epochs":2,"att":[256,64]}'
+            r: ''
+          - name: f_vo32_d256
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":16000000,"d":256,"epochs":2,"att":[256,32]}'
+            r: ''
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
-      - run: python3 hdc/prep_wikitext.py 36000000 $RUNNER_TEMP/wt.pkl
-      - name: f1
+      - if: matrix.corpus == 'wt' || matrix.corpus == 'mix'
+        run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - if: matrix.corpus == 'mix'
+        run: python3 hdc/make_mix.py $RUNNER_TEMP/wt.pkl $RUNNER_TEMP/mix.pkl ${{ matrix.r }} 16000000
+      - name: run
         working-directory: hdc
         shell: bash
-        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_f.py f1 ${{ matrix.n }} 20000 | tee ../out.log
+        run: |
+          if [ "${{ matrix.corpus }}" = "mix" ]; then LADDER_CORPUS=$RUNNER_TEMP/mix.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log
+          else LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log; fi
       - uses: actions/upload-artifact@v4
         with:
-          name: f-${{ matrix.n }}
+          name: ${{ matrix.name }}
           path: out.log

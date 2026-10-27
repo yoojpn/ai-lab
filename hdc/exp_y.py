@@ -47,6 +47,20 @@ class Block(torch.nn.Module):
         return h + s.ffn(s.ln2(h))
 
 
+class LowAttn(torch.nn.Module):
+    """検索キー(Q,K)を合計r次元、値(V,O)を合計rv次元に絞った因果attention。r=rv=d なら通常と同じ形。"""
+    def __init__(s, d, heads, r, rv):
+        super().__init__(); s.h = heads
+        s.q = torch.nn.Linear(d, r, bias=False); s.k = torch.nn.Linear(d, r, bias=False)
+        s.v = torch.nn.Linear(d, rv, bias=False); s.o = torch.nn.Linear(rv, d)
+
+    def forward(s, x, _k=None, _v=None, attn_mask=None, need_weights=False):
+        b, n, _ = x.shape; H = s.h
+        q = s.q(x).reshape(b, n, H, -1).transpose(1, 2); k = s.k(x).reshape(b, n, H, -1).transpose(1, 2); v = s.v(x).reshape(b, n, H, -1).transpose(1, 2)
+        o = F.scaled_dot_product_attention(q, k, v, is_causal=True).transpose(1, 2).reshape(b, n, -1)
+        return s.o(o), None
+
+
 class DenseFFN(torch.nn.Module):
     def __init__(s, d):
         super().__init__(); s.a = torch.nn.Linear(d, 4 * d); s.b = torch.nn.Linear(4 * d, d)
@@ -84,13 +98,15 @@ class PKM(torch.nn.Module):
         return out.reshape(sh)
 
 
-def build_layers(d, nl, kind, heads=4):
+def build_layers(d, nl, kind, heads=4, att=None):
     L = []
     for i in range(nl):
         f = DenseFFN(d)
         if kind == 'moe': f = MoEFFN(d)
         if kind == 'pkm' and i in (1, 2): f = PKM(d)
-        L.append(Block(d, heads, f))
+        blk = Block(d, heads, f)
+        if att: blk.attn = LowAttn(d, heads, att[0], att[1])
+        L.append(blk)
     return torch.nn.ModuleList(L)
 
 
@@ -119,7 +135,7 @@ class XT(GT):
     def __init__(s, d, nl, seq, cfg, freq_rank, q=None):
         super().__init__(d, nl, seq)
         s.head = cfg.get('head', 'full'); s.hb = cfg.get('hemb', 0); s.ind = cfg.get('ind', 0); s.ret = cfg.get('ret', 0)
-        if cfg.get('ffn', 'dense') != 'dense': s.layers = build_layers(d, nl, cfg['ffn'])
+        if cfg.get('ffn', 'dense') != 'dense' or cfg.get('att'): s.layers = build_layers(d, nl, cfg.get('ffn', 'dense'), att=cfg.get('att'))
         if s.ret: s.Er = torch.nn.Embedding(V, d); s.Eb = torch.nn.Embedding(4, d); torch.nn.init.normal_(s.Er.weight, std=0.02); torch.nn.init.normal_(s.Eb.weight, std=0.02)
         if s.hb: s.H = torch.nn.Embedding(1 << s.hb, d); torch.nn.init.normal_(s.H.weight, std=0.02)
         if s.ind: s.Ei = torch.nn.Embedding(V, d); torch.nn.init.normal_(s.Ei.weight, std=0.02)
@@ -254,6 +270,8 @@ def run(cfg):
     ema = {k: v.detach().clone() for k, v in net.state_dict().items()} if emad else None
     params = sum(p.numel() for p in net.parameters())
     ffn = cfg.get('ffn', 'dense'); body = nl * (12 * d * d + seq * d)
+    if cfg.get('att'):
+        r_, rv_ = cfg['att']; body = nl * (8 * d * d + 2 * d * r_ + 2 * d * rv_ + seq * (r_ + rv_) / 2)
     if ffn == 'moe': body += nl * d * 8
     if ffn == 'pkm': body += 2 * (32 * 4 * 2 * d + 4 * 2 * 128 * 32 + 8 * 4 * d - 8 * d * d)
     macs = body + {'full': d * V, 'hier': d * (C + VC), 'samp': d * (K + 1)}[head]
