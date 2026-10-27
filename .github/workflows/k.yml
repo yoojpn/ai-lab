@@ -1,5 +1,5 @@
 name: k
-# I群: 勾配ゼロで「教えていないこと」を引き出す20実験(文献: infini-gram, n-gram heads/induction)。
+# K群: 低ランク3階テンソル分解(CP-ALS)。3-gramの上乗せを、3つの因子の積の和で補完する(閉形式の掃引だけ)
 on:
   workflow_dispatch:
 jobs:
@@ -10,64 +10,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: k1_base_ep1.5
+          - name: k_cp32
             corpus: wt
-            script: exp_y.py
-            cfg: '{"N":16000000,"epochs":1.5}'
-          - name: k2_base_ep6
+            script: exp_cp.py
+            cfg: '{"N":16000000,"r":32,"sweeps":8,"neg":4,"nq":20000}'
+            r: ''
+          - name: k_cp64
             corpus: wt
-            script: exp_y.py
-            cfg: '{"N":16000000,"epochs":6}'
-          - name: k3_pe
-            corpus: wt
-            script: exp_y.py
-            cfg: '{"N":16000000,"init":"ppmi","hemb":18,"sched":"wsd","ema":0.999}'
-          - name: k4_pe_muon
-            corpus: wt
-            script: exp_y.py
-            cfg: '{"N":16000000,"init":"ppmi","hemb":18,"sched":"wsd","ema":0.999,"opt":"muon"}'
-          - name: k5_pe_pkm
-            corpus: wt
-            script: exp_y.py
-            cfg: '{"N":16000000,"init":"ppmi","hemb":18,"sched":"wsd","ema":0.999,"ffn":"pkm"}'
-          - name: k6_pe_resid
-            corpus: wt
-            script: exp_y.py
-            cfg: '{"N":16000000,"init":"ppmi","hemb":18,"sched":"wsd","ema":0.999,"resid":1}'
-          - name: k7_all
-            corpus: wt
-            script: exp_y.py
-            cfg: '{"N":16000000,"init":"ppmi","hemb":18,"sched":"wsd","ema":0.999,"opt":"muon","ffn":"pkm","resid":1}'
-          - name: k8_hier_ep1.7
-            corpus: wt
-            script: exp_y.py
-            cfg: '{"N":16000000,"epochs":1.7}'
-          - name: k9_mup_d64
-            corpus: wt
-            script: exp_mup.py
-            cfg: '{"N":8000000,"d":64,"nl":4}'
-          - name: k10_mup_d128
-            corpus: wt
-            script: exp_mup.py
-            cfg: '{"N":8000000,"d":128,"nl":4}'
-          - name: k11_mup_d256
-            corpus: wt
-            script: exp_mup.py
-            cfg: '{"N":8000000,"d":256,"nl":4}'
+            script: exp_cp.py
+            cfg: '{"N":16000000,"r":64,"sweeps":6,"neg":4,"nq":20000}'
+            r: ''
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
-      - if: matrix.corpus == 'wt'
+      - if: matrix.corpus == 'wt' || matrix.corpus == 'mix'
         run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - if: matrix.corpus == 'mix'
+        run: python3 hdc/make_mix.py $RUNNER_TEMP/wt.pkl $RUNNER_TEMP/mix.pkl ${{ matrix.r }} 16000000
       - name: run
         working-directory: hdc
         shell: bash
         run: |
-          if [ "${{ matrix.corpus }}" = "wt" ]; then LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log
-          else LADDER_CORPUS=$RUNNER_TEMP/code.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log; fi
+          if [ "${{ matrix.corpus }}" = "mix" ]; then LADDER_CORPUS=$RUNNER_TEMP/mix.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log
+          else LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log; fi
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
