@@ -1,5 +1,5 @@
 name: i
-# I群: 勾配ゼロで「教えていないこと」を引き出す20実験(文献: infini-gram, n-gram heads/induction)。
+# I群 (D2): 下の層を直近m語の表引きに置き換える。品質と節約できる計算量を測る
 on:
   workflow_dispatch:
 jobs:
@@ -10,81 +10,37 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: i01_base
+          - name: i_tab_d64
             corpus: wt
-            cfg: '{"N":16000000}'
-          - name: i02_cls200
+            script: exp_tab.py
+            cfg: '{"N":16000000,"d":64,"epochs":2,"Mw":40000}'
+            r: ''
+          - name: i_tab_d128
             corpus: wt
-            cfg: '{"N":16000000,"cls":200}'
-          - name: i03_cls1000
+            script: exp_tab.py
+            cfg: '{"N":16000000,"d":128,"epochs":2,"Mw":40000}'
+            r: ''
+          - name: i_tab_d256
             corpus: wt
-            cfg: '{"N":16000000,"cls":1000}'
-          - name: i04_mixcls
-            corpus: wt
-            cfg: '{"N":16000000,"mixcls":1000}'
-          - name: i05_main6
-            corpus: wt
-            cfg: '{"N":16000000,"main":6}'
-          - name: i06_main10
-            corpus: wt
-            cfg: '{"N":16000000,"main":10}'
-          - name: i07_ngh
-            corpus: wt
-            cfg: '{"N":16000000,"ngh":1,"bucket":"ngh"}'
-          - name: i08_far
-            corpus: wt
-            cfg: '{"N":16000000,"far":1}'
-          - name: i09_conf
-            corpus: wt
-            cfg: '{"N":16000000,"bucket":"conf"}'
-          - name: i10_prune2
-            corpus: wt
-            cfg: '{"N":16000000,"prune":2}'
-          - name: i11_prune4
-            corpus: wt
-            cfg: '{"N":16000000,"prune":4}'
-          - name: i12_all16M
-            corpus: wt
-            cfg: '{"N":16000000,"cls":1000,"mixcls":1000,"main":8,"ngh":1,"far":1,"bucket":"conf"}'
-          - name: i13_all40M
-            corpus: wt
-            cfg: '{"cls":1000,"mixcls":1000,"main":8,"ngh":1,"far":1,"bucket":"conf","N":40000000}'
-          - name: i14_all40M_nn64
-            corpus: wt
-            cfg: '{"cls":1000,"mixcls":1000,"main":8,"ngh":1,"far":1,"bucket":"conf","N":40000000,"nn_h":64,"nn_n":8000000}'
-          - name: i15_code_base
-            corpus: code
-            cfg: '{"N":20000000}'
-          - name: i16_code_all
-            corpus: code
-            cfg: '{"cls":1000,"mixcls":1000,"main":8,"ngh":1,"far":1,"bucket":"conf","N":20000000}'
-          - name: i17_code_all_nn64
-            corpus: code
-            cfg: '{"cls":1000,"mixcls":1000,"main":8,"ngh":1,"far":1,"bucket":"conf","N":20000000,"nn_h":64,"nn_n":4000000}'
-          - name: i18_code_nn64
-            corpus: code
-            cfg: '{"N":20000000,"nn_h":64,"nn_n":4000000,"main":1,"bucket":"none"}'
-          - name: i19_infini40M
-            corpus: wt
-            cfg: '{"N":40000000,"main":12,"ngh":1,"far":1,"bucket":"ngh"}'
-          - name: k20_kv
-            corpus: none
-            cfg: '{}'
+            script: exp_tab.py
+            cfg: '{"N":16000000,"d":256,"epochs":2,"Mw":40000}'
+            r: ''
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
-      - if: matrix.corpus == 'wt'
+      - if: matrix.corpus == 'wt' || matrix.corpus == 'mix'
         run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - if: matrix.corpus == 'mix'
+        run: python3 hdc/make_mix.py $RUNNER_TEMP/wt.pkl $RUNNER_TEMP/mix.pkl ${{ matrix.r }} 16000000
       - name: run
         working-directory: hdc
         shell: bash
         run: |
-          if [ "${{ matrix.corpus }}" = "wt" ]; then LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_i.py '${{ matrix.cfg }}' | tee ../out.log
-          elif [ "${{ matrix.corpus }}" = "code" ]; then LADDER_CORPUS=$RUNNER_TEMP/code.pkl python3 exp_i.py '${{ matrix.cfg }}' | tee ../out.log
-          else python3 exp_k.py | tee ../out.log; fi
+          if [ "${{ matrix.corpus }}" = "mix" ]; then LADDER_CORPUS=$RUNNER_TEMP/mix.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log
+          else LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log; fi
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
