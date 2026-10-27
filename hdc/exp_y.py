@@ -238,6 +238,23 @@ def run(cfg):
         fr = dup[:M * S].reshape(M, S).mean(1); keep = fr <= cfg['dedup']
         log('重複8-gram位置 %.4f | 重複の多い塊(>%.2f) %.4f を除く' % (dup.mean(), cfg['dedup'], 1 - keep.mean()))
         chunks = chunks[torch.from_numpy(keep)]; M = len(chunks)
+    if cfg.get('sel'):
+        # データ選別: 窓(塊)ごとに「直前1語で次の語を当てる数え方(2-gram)」の驚き(bit/語)を測り、使う塊を選ぶ。
+        # sel='rand' ランダム / 'band' 驚きの順に並べた帯 (qc=0 最も予測しやすい .. 1 最も驚きが大きい) / Dw = 使う語数
+        Dn = int(cfg['Dw'] / S); g = torch.Generator().manual_seed(0)
+        if cfg['sel'] == 'rand':
+            idx = torch.randperm(M, generator=g)[:Dn]
+        else:
+            Cb = torch.zeros(V, V); xa = torch.from_numpy(stream[:-1].astype(np.int64)); ya = torch.from_numpy(stream[1:].astype(np.int64))
+            Cb.view(-1).index_add_(0, xa * V + ya, torch.ones(len(xa)))
+            pu = torch.bincount(ya, minlength=V).float() + 1; pu = pu / pu.sum(); rs = Cb.sum(1)
+            sc = torch.zeros(M)
+            for a in range(0, M, 20000):
+                bx, by = chunks[a:a + 20000, :-1], chunks[a:a + 20000, 1:]
+                pp = (Cb[bx, by] + pu[by]) / (rs[bx] + 1.0); sc[a:a + 20000] = -torch.log2(pp).mean(1)
+            o = torch.argsort(sc); st0 = int((M - Dn) * cfg.get('qc', 0.5)); idx = o[st0:st0 + Dn]
+            log('選別 band qc=%.2f: 塊の驚き 平均 %.3f (全体 %.3f) 使う塊 %d / %d' % (cfg.get('qc', 0.5), sc[idx].mean(), sc.mean(), Dn, M))
+        chunks = chunks[idx]; M = len(chunks)
     cnt = np.bincount(stream, minlength=V).astype(np.float64)
     order = np.argsort(-cnt, kind='stable'); rank = np.empty(V, np.int64); rank[order] = np.arange(V)
     qd = ((cnt + 1) ** 0.75); qd = (qd / qd.sum()).astype(np.float32)

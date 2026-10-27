@@ -1,0 +1,112 @@
+name: n
+# N群: データ選別。45M語の山から D 語だけ選んで学習し、D を変えたときの学習曲線の傾きを、ランダムと比べる(仮説X)
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: n_rand_2M
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"Dw":2000000,"sel":"rand"}'
+            r: ''
+          - name: n_rand_4M
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"Dw":4000000,"sel":"rand"}'
+            r: ''
+          - name: n_rand_8M
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"Dw":8000000,"sel":"rand"}'
+            r: ''
+          - name: n_rand_16M
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"Dw":16000000,"sel":"rand"}'
+            r: ''
+          - name: n_mid_2M
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"Dw":2000000,"sel":"band","qc":0.5}'
+            r: ''
+          - name: n_mid_4M
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"Dw":4000000,"sel":"band","qc":0.5}'
+            r: ''
+          - name: n_mid_8M
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"Dw":8000000,"sel":"band","qc":0.5}'
+            r: ''
+          - name: n_mid_16M
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"Dw":16000000,"sel":"band","qc":0.5}'
+            r: ''
+          - name: n_hi_2M
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"Dw":2000000,"sel":"band","qc":0.85}'
+            r: ''
+          - name: n_hi_4M
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"Dw":4000000,"sel":"band","qc":0.85}'
+            r: ''
+          - name: n_hi_8M
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"Dw":8000000,"sel":"band","qc":0.85}'
+            r: ''
+          - name: n_hi_16M
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"Dw":16000000,"sel":"band","qc":0.85}'
+            r: ''
+          - name: n_top_2M
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"Dw":2000000,"sel":"band","qc":1.0}'
+            r: ''
+          - name: n_top_4M
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"Dw":4000000,"sel":"band","qc":1.0}'
+            r: ''
+          - name: n_top_8M
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"Dw":8000000,"sel":"band","qc":1.0}'
+            r: ''
+          - name: n_top_16M
+            corpus: wt
+            script: exp_y.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"Dw":16000000,"sel":"band","qc":1.0}'
+            r: ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - if: matrix.corpus == 'wt' || matrix.corpus == 'mix'
+        run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - if: matrix.corpus == 'mix'
+        run: python3 hdc/make_mix.py $RUNNER_TEMP/wt.pkl $RUNNER_TEMP/mix.pkl ${{ matrix.r }} 16000000
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: |
+          if [ "${{ matrix.corpus }}" = "mix" ]; then LADDER_CORPUS=$RUNNER_TEMP/mix.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log
+          else LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out.log
