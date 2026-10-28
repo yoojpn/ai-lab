@@ -1,0 +1,52 @@
+name: o
+# O群: 索引が学習データより大きいとき(核が学習していない文章を索引にするとき)の利得 R(T)。核は D 語だけ学習し、索引は別の文章から作る
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: o_idx_d64_D2M
+            corpus: wt
+            script: exp_knn.py
+            cfg: '{"N":45000000,"d":64,"epochs":2,"sel":"rand","Dw":2000000,"src":"out","Tmax":6000000,"Ts":[250000,1000000,2000000,4000000,6000000]}'
+            r: ''
+          - name: o_idx_d64_D4M
+            corpus: wt
+            script: exp_knn.py
+            cfg: '{"N":45000000,"d":64,"epochs":2,"sel":"rand","Dw":4000000,"src":"out","Tmax":6000000,"Ts":[250000,1000000,2000000,4000000,6000000]}'
+            r: ''
+          - name: o_idx_d128_D2M
+            corpus: wt
+            script: exp_knn.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"sel":"rand","Dw":2000000,"src":"out","Tmax":6000000,"Ts":[250000,1000000,2000000,4000000,6000000]}'
+            r: ''
+          - name: o_idx_d128_D4M
+            corpus: wt
+            script: exp_knn.py
+            cfg: '{"N":45000000,"d":128,"epochs":2,"sel":"rand","Dw":4000000,"src":"out","Tmax":6000000,"Ts":[250000,1000000,2000000,4000000,6000000]}'
+            r: ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - if: matrix.corpus == 'wt' || matrix.corpus == 'mix'
+        run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - if: matrix.corpus == 'mix'
+        run: python3 hdc/make_mix.py $RUNNER_TEMP/wt.pkl $RUNNER_TEMP/mix.pkl ${{ matrix.r }} 16000000
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: |
+          if [ "${{ matrix.corpus }}" = "mix" ]; then LADDER_CORPUS=$RUNNER_TEMP/mix.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log
+          else LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 ${{ matrix.script }} '${{ matrix.cfg }}' | tee ../out.log; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out.log

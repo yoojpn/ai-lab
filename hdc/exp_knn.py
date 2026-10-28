@@ -27,6 +27,11 @@ def main(cfg):
     net.eval(); d = cfg.get('d', 128); nl = cfg.get('nl', 4); seq = cfg.get('seq', 64); S = seq + 1
     ctx = lab.load(cfg['N']); stream = np.concatenate(ctx.tr_i)[:cfg['N']]
     M = len(stream) // S; chunks = torch.from_numpy(stream[:M * S].reshape(M, S).astype(np.int64))
+    if cfg.get('sel') == 'rand':
+        # 核は D 語だけで学習(exp_y と同じ乱数で選ぶ)。索引は、核が学習しなかった塊(src=out)か、全部(src=all)から作る。
+        Dn = int(cfg['Dw'] / S); perm = torch.randperm(M, generator=torch.Generator().manual_seed(0))
+        order = perm[Dn:] if cfg.get('src', 'out') == 'out' else perm
+        chunks = chunks[order]; M = len(chunks); log('索引の元: 核が学習していない塊 %d (src=%s)' % (M, cfg.get('src', 'out')))
     Tmax = cfg.get('Tmax', 4_000_000); lo = 32; per = S - 1 - lo
     nw = min(M, -(-Tmax // per)); Ks, ys = [], []
     with torch.no_grad():
