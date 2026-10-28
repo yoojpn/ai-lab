@@ -10,8 +10,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: cb_2M
+            cfg: '{"N":2000000,"ntune":2500,"ntest":20000}'
+          - name: cb_4M
+            cfg: '{"N":4000000,"ntune":2500,"ntest":20000}'
+          - name: cb_8M
+            cfg: '{"N":8000000,"ntune":2500,"ntest":20000}'
           - name: cb_16M
             cfg: '{"N":16000000,"ntune":2500,"ntest":20000}'
+          - name: cb_45M
+            cfg: '{"N":45000000,"ntune":2500,"ntest":20000}'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
