@@ -1,0 +1,23 @@
+name: ex
+# EX: 表(CB2)に A(EMグループ) E(近傍検索) D(話題) C(グループの組) を足し、全部の上に B(木で再ランク)。 16M語
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy lightgbm torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_ex.py '{"N":16000000,"K":1024,"nfit":800000,"nidx":1500000,"ntopic":300000,"Kz":128,"ntune":4000,"nrank":8000,"ntest":20000}' | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ex
+          path: out.log
