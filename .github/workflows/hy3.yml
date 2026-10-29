@@ -1,0 +1,31 @@
+name: hy3
+# HY3: 周回(ブースティング)で勾配なしの骨格を作る。 周回ごとの bit/語 の下がり方を測る (表は使わない)
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: hy3_m512
+            cfg: '{"N":16000000,"m":512,"R":16,"nfit":400000,"ntune":4000,"ntest":20000}'
+          - name: hy3_m1024
+            cfg: '{"N":16000000,"m":1024,"R":12,"nfit":400000,"ntune":4000,"ntest":20000}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_hy3.py '${{ matrix.cfg }}' | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out.log
