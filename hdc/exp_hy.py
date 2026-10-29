@@ -125,6 +125,9 @@ def fit_skeleton(x, E, nfit, rng):
 
 
 def main(cfg):
+    global SIZES
+    if cfg.get('sizes'):
+        SIZES = [tuple(z) for z in cfg['sizes']]
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(0)
     N = cfg['N']; ntune = cfg.get('ntune', 4000); ntest = cfg.get('ntest', 20000); nfit = cfg.get('nfit', 1500000)
     x, Xva, yva, Xte, yte = B.load(N, ntune, ntest)

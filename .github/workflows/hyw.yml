@@ -1,0 +1,23 @@
+name: hyw
+# HYW: 骨格(勾配なし)の幅を広げたときの傾き。 relu 幅 1024/2048/4096 (座標64次元) を 16M語で
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_hy.py '{"N":16000000,"ntune":4000,"ntest":20000,"nfit":1500000,"sizes":[["lin",64,0],["relu",64,1024],["relu",64,2048],["relu",64,4096]]}' | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hyw
+          path: out.log
