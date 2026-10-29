@@ -1,0 +1,33 @@
+name: hy2
+# HY2: 表(CB2) + 小さな密Transformer(勾配あり)。 16M語, 2エポック。 d32/2層, d48/3層, d64/4層
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: hy2_d32
+            cfg: '{"N":16000000,"d":32,"nl":2,"epochs":2}'
+          - name: hy2_d48
+            cfg: '{"N":16000000,"d":48,"nl":3,"epochs":2}'
+          - name: hy2_d64
+            cfg: '{"N":16000000,"d":64,"nl":4,"epochs":2}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - run: python3 hdc/prep_wikitext.py 45000000 $RUNNER_TEMP/wt.pkl
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_hy2.py '${{ matrix.cfg }}' | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out.log
