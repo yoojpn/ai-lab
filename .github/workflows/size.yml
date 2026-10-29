@@ -1,0 +1,23 @@
+name: size
+# SIZE: 表の保存形式(列ごとの可変長整数+zlib)の実バイト数と、枝刈り(回数m未満を捨てる)と bit/語 の関係。 103M語
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - run: python3 hdc/prep_wikitext.py 103000000 $RUNNER_TEMP/wt.pkl
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_size.py '{"N":103000000,"ntune":4000,"ntest":20000,"ms":[1,2,3,5]}' | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: size
+          path: out.log
