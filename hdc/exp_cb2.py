@@ -198,16 +198,32 @@ def main(cfg):
     for vn, (nm, gated) in variants.items():
         w, D, b = fit(Fv, nm, yva, gate=gv, gated=gated); fitted[vn] = (nm, w, D, gated); log('%-12s 調整窓 %.4f' % (vn, b))
     tot = {vn: 0.0 for vn in fitted}; n_te = len(yte)
+    conf = {'pmax': [], 'ok': [], 'bits': []}
     for a in range(0, n_te, 250):
         Fc, gc = all_feats(Xte[a:a + 250], G); yc = yte[a:a + 250]
         with torch.no_grad():
             for vn, (nm, w, D, gated) in fitted.items():
                 z = logits(Fc, nm, w, gc, D); tot[vn] += Fn.cross_entropy(z, yc, reduction='sum').item()
+                if vn == '+all_gated':
+                    pr = torch.softmax(z, 1); pm_, am = pr.max(1)
+                    conf['pmax'].append(pm_); conf['ok'].append((am == yc).float())
+                    conf['bits'].append(Fn.cross_entropy(z, yc, reduction='none') / LN2)
         if (a // 250) % 20 == 0:
             log('テスト %d / %d' % (a, n_te))
     res = dict(cfg=cfg, beta=beta, test_bits={vn: tot[vn] / n_te / LN2 for vn in tot},
                weights={vn: dict(zip(fitted[vn][0], [round(float(v), 3) for v in fitted[vn][1]])) for vn in ('+all',)},
                entries={nm: int(len(G.sp[nm][0])) for nm in SPECS})
+    pmx = torch.cat(conf['pmax']); okc = torch.cat(conf['ok']); bts = torch.cat(conf['bits'])
+    skip = []
+    for th in (0.3, 0.5, 0.7, 0.8, 0.9, 0.95, 0.99):
+        m = pmx >= th; fr = m.float().mean().item()
+        acc = okc[m].mean().item() if m.any() else 0.0
+        bl = bts[m].mean().item() if m.any() else 0.0
+        br = bts[~m].mean().item() if (~m).any() else 0.0
+        skip.append(dict(th=th, frac=fr, acc=acc, bits_in=bl, bits_out=br))
+        log('自信>=%.2f: 割合 %.3f, 的中 %.3f, 平均bit(内) %.3f, 平均bit(外) %.3f' % (th, fr, acc, bl, br))
+    log('全体 top1 的中 %.3f, 平均bit %.3f' % (okc.mean().item(), bts.mean().item()))
+    res['skip'] = skip; res['top1'] = okc.mean().item()
     for vn in tot:
         log('テスト %-12s %.4f bit/語' % (vn, res['test_bits'][vn]))
     log('RESULT_CB2 ' + json.dumps(res))
