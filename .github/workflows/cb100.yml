@@ -1,0 +1,25 @@
+name: cb100
+# F: CB2(+all_gated)を WikiText-103 全体(約1億語)で。 45M語の次の点(倍増あたりの下がりを測る)
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - run: python3 hdc/prep_wikitext.py 103000000 $RUNNER_TEMP/wt.pkl
+      - name: memory
+        run: free -g; df -h $RUNNER_TEMP | tail -1
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: LADDER_CORPUS=$RUNNER_TEMP/wt.pkl python3 exp_cb2.py '{"N":103000000,"ntune":4000,"ntest":20000}' | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cb100
+          path: out.log
