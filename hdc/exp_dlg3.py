@@ -153,12 +153,14 @@ def main(cfg):
     for nm in KV:
         variants['+A+%s+T' % nm] = allx + A_ + kn(nm) + T_
     variants['+A+allK+T'] = allx + A_ + sum([kn(nm) for nm in KV], []) + T_
+    if cfg.get('only'):
+        variants = {k: v for k, v in variants.items() if k in cfg['only']}
     fitted = {}
     for vn, nm in variants.items():
         w, Dm, b = C2.fit(Fv, nm, yva, gate=gv, gated=True); fitted[vn] = (nm, w, Dm); log('%-14s 調整窓(きれい) %.4f' % (vn, b))
     del Fv
     res = {}
-    for tag, Xte, yte in (('full', Xte_f, yte_f), ('clean', Xte_c, yte_c)):
+    for tag, Xte, yte in ((() if cfg.get('skip_test') else (('full', Xte_f, yte_f), ('clean', Xte_c, yte_c)))):
         ce = {vn: [] for vn in fitted}
         for a in range(0, len(yte), 250):
             Xc = Xte[a:a + 250]; Fc, gc = C2.all_feats(Xc, G); Fc.update(new_feats3(Xc, G))
@@ -171,11 +173,13 @@ def main(cfg):
         log('--- テスト窓 %s (%d) ---' % (tag, len(yte)))
         for vn in fitted:
             r = res[vn][tag]; log('%-14s 全体 %.4f, ターン先頭 %.4f, ターン内 %.4f' % (vn, r['test'], r['turn_first'], r['turn_inner']))
-    best = min((v for v in fitted if v != 'base'), key=lambda v: res[v]['clean']['test']); log('きれいなテストで最良: %s' % best)
+    best = min((v for v in fitted if v != 'base'), key=lambda v: res[v]['clean']['test']) if res else '+A+allK+T'
+    if res:
+        log('きれいなテストで最良: %s' % best)
     samples = {}
     for vn in ('base', best):
         nm, w, Dm = fitted[vn]; torch.manual_seed(0); samples[vn] = []
-        for pr in D.PROMPTS:
+        for pr in cfg.get('prompts', D.PROMPTS):
             toks = [STOI.get(t, 0) for t in D.TOK.findall(pr.lower())] + [SEPID]; seen_s = 0; out = []
             for _ in range(120):
                 c = toks[-SEQ:]; X1 = torch.zeros(1, SEQ, dtype=torch.long); X1[0, SEQ - len(c):] = torch.tensor(c)
