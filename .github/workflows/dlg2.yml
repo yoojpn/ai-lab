@@ -1,0 +1,22 @@
+name: dlg2
+# DLG2: 会話をつなげるための勾配なしの部品 (A ターンをまたぐ共起, K ターン単位の検索, T 決定木の森)。 DailyDialog だけ
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: python3 exp_dlg2.py '{"ntune":4000,"ntest":20000,"trees":8,"ntree":600000,"depth":14}' | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dlg2
+          path: out.log
