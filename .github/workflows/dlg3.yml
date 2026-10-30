@@ -1,0 +1,30 @@
+name: dlg3
+# DLG3: 丸暗記を除いたきれいな測り直し + 検索の強化(k64, kc, kt) + 予測クラス。 DailyDialog だけ
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: dlg3_km
+            cfg: '{"ntune":4000,"ntest":20000,"trees":8,"ntree":600000,"depth":14,"pcls":false}'
+          - name: dlg3_pcls
+            cfg: '{"ntune":4000,"ntest":20000,"trees":8,"ntree":600000,"depth":14,"pcls":true}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy pandas pyarrow scipy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: python3 exp_dlg3.py '${{ matrix.cfg }}' | tee ../out.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out.log
