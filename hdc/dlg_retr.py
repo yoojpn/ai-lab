@@ -18,7 +18,7 @@ def build_items(Tte, docs, lang, n, rng, maxlen=300):
         x = np.asarray(Tte[a:b]); seps = np.flatnonzero(x == 2)
         if len(seps) < 2: continue
         cut = seps[-1]; resp = x[cut + 1:]
-        if len(resp) < 3 or resp[-1] != 1: continue
+        if len(resp) < 3 or resp[-1] != 1 or int(lang[d]) != 0: continue            # 英語のみ (日本語は件数が足りない)
         items.append(dict(ctx=x[:cut + 1], last=np.r_[0, x[seps[-2] + 1:cut + 1]], resp=resp, lang=int(lang[d])))
         if len(items) >= n: break
     return items

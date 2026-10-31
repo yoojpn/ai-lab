@@ -1,0 +1,396 @@
+{
+ "res": {
+  "n_test": 953345,
+  "lm5": 6.502735755631074,
+  "lm3": 6.5603439699106305,
+  "lm5_en": 6.471544039101518,
+  "lm5_ja": 7.109132044737785,
+  "n_ja": 46639,
+  "lm5+cache": 6.340374043927948,
+  "lm5+cache_en": 6.313904818848327,
+  "lm5+cache_ja": 6.854960660172782,
+  "lm5+copy": 6.314650274970341,
+  "A連続のみ": {
+   "rules": 1,
+   "fire": 0.0029097546009052336,
+   "lm5_rules": 6.341029862701467,
+   "lm5_rules_copy": 6.314846171337898,
+   "en": 6.293259948826898,
+   "ja": 6.734502627695425
+  },
+  "B+遠い・構造": {
+   "rules": 3,
+   "fire": 0.006472997708070006,
+   "lm5_rules": 6.340787862138109,
+   "lm5_rules_copy": 6.313924402971846,
+   "en": 6.292292022897593,
+   "ja": 6.734478205746466
+  },
+  "C+クラス": {
+   "rules": 7,
+   "fire": 0.008512133592770718,
+   "lm5_rules": 6.3427558771109105,
+   "lm5_rules_copy": 6.3159868638944765,
+   "en": 6.2944563522135075,
+   "ja": 6.734560249348825
+  },
+  "D全部": {
+   "rules": 4,
+   "fire": 0.007014249825614023,
+   "lm5_rules": 6.340857109285454,
+   "lm5_rules_copy": 6.313922026497302,
+   "en": 6.292291367051315,
+   "ja": 6.734442378641055
+  }
+ },
+ "rules": {
+  "A連続のみ": [
+   {
+    "rule": 0,
+    "feats": [
+     "off1",
+     "off2"
+    ],
+    "prec": 0.9431137724550899,
+    "ctx": " quite,<turn>Dan,——for my sake——<turn>I can’",
+    "pred": "t"
+   },
+   {
+    "rule": 0,
+    "feats": [
+     "off1",
+     "off2"
+    ],
+    "prec": 0.9431137724550899,
+    "ctx": " likely nothing but to get into your good graces.<turn>But there’",
+    "pred": "s"
+   }
+  ],
+  "B+遠い・構造": [
+   {
+    "rule": 0,
+    "feats": [
+     "off1",
+     "ind1",
+     "ind2"
+    ],
+    "prec": 0.9531416400425985,
+    "ctx": "t love her,<turn>Perhaps——It isn’t——You don",
+    "pred": "’"
+   },
+   {
+    "rule": 0,
+    "feats": [
+     "off1",
+     "ind1",
+     "ind2"
+    ],
+    "prec": 0.9531416400425985,
+    "ctx": " needle,<turn>I don’t want a winch,<turn>Well",
+    "pred": ","
+   },
+   {
+    "rule": 1,
+    "feats": [
+     "off1",
+     "off2"
+    ],
+    "prec": 0.9183055975794251,
+    "ctx": " quite,<turn>Dan,——for my sake——<turn>I can’",
+    "pred": "t"
+   },
+   {
+    "rule": 1,
+    "feats": [
+     "off1",
+     "off2"
+    ],
+    "prec": 0.9183055975794251,
+    "ctx": " likely nothing but to get into your good graces.<turn>But there’",
+    "pred": "s"
+   },
+   {
+    "rule": 2,
+    "feats": [
+     "off1",
+     "off2",
+     "off3",
+     "ind2"
+    ],
+    "prec": 0.7385019710906702,
+    "ctx": " determine from the formula the class of cases in which you have a right",
+    "pred": " to"
+   },
+   {
+    "rule": 2,
+    "feats": [
+     "off1",
+     "off2",
+     "off3",
+     "ind2"
+    ],
+    "prec": 0.7385019710906702,
+    "ctx": " that you were going to marry me, though you did not love me",
+    "pred": ","
+   }
+  ],
+  "C+クラス": [
+   {
+    "rule": 0,
+    "feats": [
+     "off1",
+     "off2",
+     "c2"
+    ],
+    "prec": 0.9260424862313139,
+    "ctx": " quite,<turn>Dan,——for my sake——<turn>I can’",
+    "pred": "t"
+   },
+   {
+    "rule": 0,
+    "feats": [
+     "off1",
+     "off2",
+     "c2"
+    ],
+    "prec": 0.9260424862313139,
+    "ctx": " likely nothing but to get into your good graces.<turn>But there’",
+    "pred": "s"
+   },
+   {
+    "rule": 1,
+    "feats": [
+     "off1",
+     "cur_first",
+     "c_prev_first",
+     "prev_last"
+    ],
+    "prec": 0.6656151419558359,
+    "ctx": " little in time; if you will only let me hope--<turn>Oh",
+    "pred": ","
+   },
+   {
+    "rule": 1,
+    "feats": [
+     "off1",
+     "cur_first",
+     "c_prev_first",
+     "prev_last"
+    ],
+    "prec": 0.6656151419558359,
+    "ctx": " not, Mr. Jasniff,<turn>And I suppose you don",
+    "pred": "'t"
+   },
+   {
+    "rule": 2,
+    "feats": [
+     "off1",
+     "c_prev_first",
+     "c_prev_last"
+    ],
+    "prec": 0.5769230769230769,
+    "ctx": "Susie'll smooth him down, Ed, but I guess he won",
+    "pred": "'t"
+   },
+   {
+    "rule": 2,
+    "feats": [
+     "off1",
+     "c_prev_first",
+     "c_prev_last"
+    ],
+    "prec": 0.5769230769230769,
+    "ctx": "--fit for a King's ransom;<turn>Thank you, I don",
+    "pred": "'t"
+   },
+   {
+    "rule": 3,
+    "feats": [
+     "off1",
+     "off2",
+     "off3",
+     "c2"
+    ],
+    "prec": 0.6853055916775033,
+    "ctx": "みたいことですって……いったい、それはなんですね？<turn>じつは",
+    "pred": "、"
+   },
+   {
+    "rule": 3,
+    "feats": [
+     "off1",
+     "off2",
+     "off3",
+     "c2"
+    ],
+    "prec": 0.6853055916775033,
+    "ctx": " determine from the formula the class of cases in which you have a right",
+    "pred": " to"
+   },
+   {
+    "rule": 4,
+    "feats": [
+     "off1",
+     "off2",
+     "prev_first"
+    ],
+    "prec": 0.5723076923076923,
+    "ctx": " directly after the war? Will you live in England?<turn>I—",
+    "pred": "I"
+   },
+   {
+    "rule": 4,
+    "feats": [
+     "off1",
+     "off2",
+     "prev_first"
+    ],
+    "prec": 0.5723076923076923,
+    "ctx": ", I'm going home for a couple of days. It's such",
+    "pred": " a"
+   },
+   {
+    "rule": 5,
+    "feats": [
+     "off1",
+     "off3",
+     "c1",
+     "c_prev_first"
+    ],
+    "prec": 0.5034013605442177,
+    "ctx": "でございました<turn>何人のお長屋でござりましたかな？<turn>さあそれは",
+    "pred": "、"
+   },
+   {
+    "rule": 5,
+    "feats": [
+     "off1",
+     "off3",
+     "c1",
+     "c_prev_first"
+    ],
+    "prec": 0.5034013605442177,
+    "ctx": "'s a good one now--Why's a pretty governess like a----",
+    "pred": "<turn>"
+   },
+   {
+    "rule": 6,
+    "feats": [
+     "off1",
+     "c3",
+     "c_prev_first",
+     "c_prev_last"
+    ],
+    "prec": 0.555,
+    "ctx": "き歸るだらうと云つたので――<turn>それなら、分つたが",
+    "pred": "、"
+   },
+   {
+    "rule": 6,
+    "feats": [
+     "off1",
+     "c3",
+     "c_prev_first",
+     "c_prev_last"
+    ],
+    "prec": 0.555,
+    "ctx": "ころがり落ちて線路の上へぶったおれたのでしょう。",
+    "pred": "<turn>"
+   }
+  ],
+  "D全部": [
+   {
+    "rule": 0,
+    "feats": [
+     "off1",
+     "ind1",
+     "ind2"
+    ],
+    "prec": 0.9531416400425985,
+    "ctx": "t love her,<turn>Perhaps——It isn’t——You don",
+    "pred": "’"
+   },
+   {
+    "rule": 0,
+    "feats": [
+     "off1",
+     "ind1",
+     "ind2"
+    ],
+    "prec": 0.9531416400425985,
+    "ctx": " needle,<turn>I don’t want a winch,<turn>Well",
+    "pred": ","
+   },
+   {
+    "rule": 1,
+    "feats": [
+     "off1",
+     "off2",
+     "c2"
+    ],
+    "prec": 0.8982494529540481,
+    "ctx": " quite,<turn>Dan,——for my sake——<turn>I can’",
+    "pred": "t"
+   },
+   {
+    "rule": 1,
+    "feats": [
+     "off1",
+     "off2",
+     "c2"
+    ],
+    "prec": 0.8982494529540481,
+    "ctx": " likely nothing but to get into your good graces.<turn>But there’",
+    "pred": "s"
+   },
+   {
+    "rule": 2,
+    "feats": [
+     "off1",
+     "c1",
+     "c3",
+     "since_sep"
+    ],
+    "prec": 0.5012285012285013,
+    "ctx": "<turn>呀、復見て居たの、<eos><bos>厭な！",
+    "pred": "<turn>"
+   },
+   {
+    "rule": 2,
+    "feats": [
+     "off1",
+     "c1",
+     "c3",
+     "since_sep"
+    ],
+    "prec": 0.5012285012285013,
+    "ctx": "isms of all kinds. It destroys them absolutely.<turn>The germ’",
+    "pred": "s"
+   },
+   {
+    "rule": 3,
+    "feats": [
+     "off1",
+     "prev_first",
+     "prev_last",
+     "ind1"
+    ],
+    "prec": 0.6680161943319838,
+    "ctx": "'s a nice way of earning a living, do you?<turn>Oh",
+    "pred": ","
+   },
+   {
+    "rule": 3,
+    "feats": [
+     "off1",
+     "prev_first",
+     "prev_last",
+     "ind1"
+    ],
+    "prec": 0.6680161943319838,
+    "ctx": " me to pick out a wife for you, do you?<turn>Well",
+    "pred": ","
+   }
+  ]
+ }
+}
