@@ -10,7 +10,7 @@ W = '/tmp/tok'; V = 32768
 
 
 def next_dist(model, T):
-    i = len(T); arr = np.r_[T, 0].astype(np.uint16); P = model.uni_p.copy()
+    i = len(T); arr = np.r_[T, 0].astype(np.uint16); P = (model.cont_p if model.kn_base else model.uni_p).copy()
     for n in model.orders[1:]:
         h = E.ctx_hash(arr, np.array([i]), n - 1, n)[0]; t = model.t[n]
         j = int(np.searchsorted(t['uc'], h))
@@ -18,7 +18,7 @@ def next_dist(model, T):
         lo = int(np.searchsorted(t['k'], np.uint64(h) << np.uint64(16))); hi = int(np.searchsorted(t['k'], (np.uint64(h) + np.uint64(1)) << np.uint64(16)))
         add = np.zeros(V); add[(np.asarray(t['k'][lo:hi]) & np.uint64(0xFFFF)).astype(np.int64)] = np.asarray(t['c'][lo:hi]).astype(np.float64)
         N, Tn, X = float(t['N'][j]), float(t['T'][j]), float(t['X'][j])
-        P = (add + (Tn + X) * P) / (N + Tn)
+        lm_ = model.lam[n]; P = (add + lm_ * (Tn + X) * P) / (N - X + lm_ * (Tn + X))
     return P / P.sum()
 
 
@@ -61,7 +61,7 @@ def beam_search(model, base, bw, g, maxlen, alpha=0.7):
 
 
 def main(cfg):
-    tk = Tokenizer.from_file(W + '/tok.json'); model = E.Model({n: '%s/final_o%d' % (W, n) for n in (1, 2, 3, 4, 5)})
+    tk = Tokenizer.from_file(W + '/tok.json'); lam = {int(k): v for k, v in json.load(open(W + '/lam.json')).items()}; model = E.Model({n: '%s/final_o%d' % (W, n) for n in (1, 2, 3, 4, 5)}, smooth='wb', lam=lam, kn_base=True)
     rng = np.random.default_rng(cfg.get('seed', 0)); temp = cfg.get('temp', 0.8); topk = cfg.get('topk', 40); g = cfg.get('cache', 0.15)
     base = [0] * 8 + [0]
     for k, t in enumerate(cfg['history']):
