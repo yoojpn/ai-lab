@@ -1,0 +1,54 @@
+name: collect
+# データ収集を 20 並列で回し、 結果を Hugging Face のプライベートデータセットへ上げる。
+# 使い方: Actions から task を選んで実行 (または gh api で dispatch)。 HF_TOKEN は Secrets に入れておく (ログには出さない)。
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'dialog_gutenberg | dialog_aozora | stackexchange | code_crates | code_npm'
+        required: true
+        default: 'dialog_gutenberg'
+      shards:
+        description: '並列数 (最大 20)'
+        required: false
+        default: '20'
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: |
+          N=${{ github.event.inputs.shards }}
+          python3 -c "import json;n=int('$N');print('matrix='+json.dumps({'idx':list(range(n))}))" >> "$GITHUB_OUTPUT"
+  run:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      TASK: ${{ github.event.inputs.task }}
+      NSH: ${{ github.event.inputs.shards }}
+      IDX: ${{ matrix.idx }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: secret の確認 (値は出さない)
+        run: |
+          if [ -z "$HF_TOKEN" ]; then echo "HF_TOKEN が Secrets にありません"; exit 1; fi
+      - name: 依存
+        run: pip install -q huggingface_hub pyarrow tokenizers py7zr lxml beautifulsoup4
+      - name: dialog_gutenberg
+        if: env.TASK == 'dialog_gutenberg'
+        working-directory: hdc
+        run: python3 collect_dialog.py "{\"source\":\"gutenberg\",\"idx\":$IDX,\"n\":$NSH,\"out\":\"/tmp/out\",\"upload\":\"Youichi1/ai-lab-data\"}"
+      - name: dialog_aozora
+        if: env.TASK == 'dialog_aozora' && matrix.idx == 0
+        working-directory: hdc
+        run: python3 collect_dialog.py "{\"source\":\"aozora\",\"out\":\"/tmp/out\",\"upload\":\"Youichi1/ai-lab-data\"}"
