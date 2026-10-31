@@ -16,11 +16,16 @@ UA = {'User-Agent': 'ai-lab-research/0.1 (youichi0929@outlook.jp)'}
 def get(url, limit=None, tries=3):
     for k in range(tries):
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=60) as r:
-                b = r.read(limit + 1 if limit else -1)
-                if limit and len(b) > limit:
-                    return None
-                return b
+            with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=30) as r:
+                t_end = time.time() + 150; chunks = []; n = 0
+                while True:
+                    c = r.read(1 << 20)
+                    if not c:
+                        break
+                    chunks.append(c); n += len(c)
+                    if (limit and n > limit) or time.time() > t_end:
+                        return None
+                return b''.join(chunks)
         except Exception:
             time.sleep(1 + k)
     return None
