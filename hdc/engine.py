@@ -49,12 +49,14 @@ def spill(tok_path, ntok, run_dir, orders, chunk, log):
 
 
 def merge(runs_n, out_prefix, minc, max_range_entries, log):
+    """ランを併合。 しきい値で項目を捨てても、 文脈ごとの総数 N・種類数 T は 捨てる前の値で記録する (確率の質量を正しく保つ)。
+    範囲の境界は 文脈の境目に揃える (同じ文脈が 2 つの範囲に分かれない)。 出力: _k, _c (項目), _uc, _N, _T (文脈。 残った項目を持つ文脈のみ)"""
     ks = [np.load(a, mmap_mode='r') for a, _ in runs_n]; cs = [np.load(b, mmap_mode='r') for _, b in runs_n]
     total = sum(len(k) for k in ks); R = max(1, int(np.ceil(total / max_range_entries)))
-    # 範囲の境界: 各ランから等間隔に標本
     samp = np.sort(np.concatenate([np.asarray(k[::max(1, len(k) // 20000)]) for k in ks]))
-    cuts = [np.uint64(0)] + [samp[int(len(samp) * i / R)] for i in range(1, R)] + [None]
-    fk = open(out_prefix + '_k.bin', 'wb'); fc = open(out_prefix + '_c.bin', 'wb'); nkeep = 0
+    sh = np.uint64(16)
+    cuts = [np.uint64(0)] + [(samp[int(len(samp) * i / R)] >> sh) << sh for i in range(1, R)] + [None]
+    fk = open(out_prefix + '_k.bin', 'wb'); fc = open(out_prefix + '_c.bin', 'wb'); fu = open(out_prefix + '_uc.bin', 'wb'); fN = open(out_prefix + '_N.bin', 'wb'); fT = open(out_prefix + '_T.bin', 'wb'); nkeep = 0
     for r in range(R):
         a, b = cuts[r], cuts[r + 1]; parts_k = []; parts_c = []
         for k, c in zip(ks, cs):
@@ -66,10 +68,15 @@ def merge(runs_n, out_prefix, minc, max_range_entries, log):
             continue
         kk = np.concatenate(parts_k); cc = np.concatenate(parts_c).astype(np.uint64)
         o = np.argsort(kk, kind='stable'); kk = kk[o]; cc = cc[o]
-        first = np.r_[True, kk[1:] != kk[:-1]]; st = np.flatnonzero(first); u = kk[st]; s = np.add.reduceat(cc, st)
-        keep = s >= minc; u = u[keep]; s = np.minimum(s[keep], 2 ** 32 - 1).astype(np.uint32)
-        u.tofile(fk); s.tofile(fc); nkeep += len(u)
-    fk.close(); fc.close(); log('併合 %d 項目 -> %d 項目 (範囲 %d, しきい値 %d)' % (total, nkeep, R, minc))
+        first = np.r_[True, kk[1:] != kk[:-1]]; st = np.flatnonzero(first); u = kk[st]; s_ = np.add.reduceat(cc, st)
+        ctx = u >> sh; cst = np.r_[0, np.flatnonzero(ctx[1:] != ctx[:-1]) + 1]
+        keep = s_ >= minc
+        Nfull = np.add.reduceat(s_, cst); Tfull = np.diff(np.r_[cst, len(u)]); has = np.add.reduceat(keep.astype(np.int64), cst) > 0
+        ctx[cst][has].tofile(fu); Nfull[has].astype(np.float32).tofile(fN); Tfull[has].astype(np.float32).tofile(fT)
+        u = u[keep]; s_ = np.minimum(s_[keep], 2 ** 32 - 1).astype(np.uint32)
+        u.tofile(fk); s_.tofile(fc); nkeep += len(u)
+    for f in (fk, fc, fu, fN, fT): f.close()
+    log('併合 %d 項目 -> %d 項目 (範囲 %d, しきい値 %d)' % (total, nkeep, R, minc))
     return nkeep
 
 

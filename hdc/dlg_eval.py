@@ -79,17 +79,19 @@ def main(cfg):
     plm5v = 2.0 ** model5.logprob_at(Tva, pva)
     ltt = lang_of(docs['test'], lang['test'], pte)
     def bits(P, m=None): return float(-np.log2(P if m is None else P[m]).mean())
+    cm = C.CacheMix().fit(plm5v, *C.cache_stats(Tva, pva, st['val'], yva)); ccnt, cwl = C.cache_stats(Tte, pte, st['test'], yte); plmc = cm.apply(plm5, ccnt, cwl)
     res = {'n_test': int(len(pte)), 'lm5': bits(plm5), 'lm3': bits(plm3), 'lm5_en': bits(plm5, ltt == 0), 'lm5_ja': bits(plm5, ltt == 1), 'n_ja': int((ltt == 1).sum())}
     log('LM のみ: 5-gram %.4f / 3-gram %.4f bit/token (en %.4f, ja %.4f; ja 件数 %d)' % (res['lm5'], res['lm3'], res['lm5_en'], res['lm5_ja'], res['n_ja']))
-    Pc, _, ncp = mix(plm5, yte, None, None, calibrate(None, Fva, cpva, yva, fm)[1], Fte, cpte, fm, use_rules=False, use_copy=True)
+    res['lm5+cache'] = bits(plmc); res['lm5+cache_en'] = bits(plmc, ltt == 0); res['lm5+cache_ja'] = bits(plmc, ltt == 1); log('LM5 + キャッシュ: %.4f (en %.4f, ja %.4f)  [LM5 のみ %.4f]' % (res['lm5+cache'], res['lm5+cache_en'], res['lm5+cache_ja'], res['lm5']))
+    Pc, _, ncp = mix(plmc, yte, None, None, calibrate(None, Fva, cpva, yva, fm)[1], Fte, cpte, fm, use_rules=False, use_copy=True)
     res['lm5+copy'] = bits(Pc); log('LM5 + コピー: %.4f (コピー使用 %d)' % (res['lm5+copy'], ncp))
     tk = Tokenizer.from_file(W + '/tok.json'); rules_out = {}
     for nm, allowed in sets.items():
-        rc = RuleCover(maxk=cfg.get('maxk', 4), beam=cfg.get('beam', 6), purity=cfg.get('purity', 0.98), minn=5, sample=cfg.get('sample', 200_000), rounds=cfg.get('rounds', 20), ny=65536)
+        rc = RuleCover(maxk=cfg.get('maxk', 4), beam=cfg.get('beam', 6), purity=cfg.get('purity', 0.9), minn=3, wrong_pen=cfg.get('wp', 1.5), min_gain=cfg.get('mg', 20), sample=cfg.get('sample', 200_000), rounds=cfg.get('rounds', 20), ny=65536)
         rc.fit(Ftr, ytr, names, log=lambda s: None, allowed=allowed)
         prec, rel = calibrate(rc, Fva, cpva, yva, fm)
-        P1, nf, _ = mix(plm5, yte, rc, prec, rel, Fte, cpte, fm, use_rules=True, use_copy=False)
-        P2, nf2, ncp2 = mix(plm5, yte, rc, prec, rel, Fte, cpte, fm, use_rules=True, use_copy=True)
+        P1, nf, _ = mix(plmc, yte, rc, prec, rel, Fte, cpte, fm, use_rules=True, use_copy=False)
+        P2, nf2, ncp2 = mix(plmc, yte, rc, prec, rel, Fte, cpte, fm, use_rules=True, use_copy=True)
         res[nm] = dict(rules=len(rc.rules), fire=nf / len(yte), lm5_rules=bits(P1), lm5_rules_copy=bits(P2), en=bits(P2, ltt == 0), ja=bits(P2, ltt == 1))
         log('%s: 規則 %d 本 発火 %.3f | LM5+規則 %.4f | +コピー %.4f (en %.4f, ja %.4f)' % (nm, len(rc.rules), nf / len(yte), res[nm]['lm5_rules'], res[nm]['lm5_rules_copy'], res[nm]['en'], res[nm]['ja']))
         ex = []

@@ -119,3 +119,36 @@ def features(T, pos, st, fm, cls, win=WIN):
     F['ind1'] = f_of(ind1, fm); F['ind2'] = f_of(ind2, fm); F['topic'] = topic
     names = list(F.keys()); M = np.stack([F[nm] for nm in names], axis=1).astype(np.int16)
     return M, names, np.stack([ind1, ind2], axis=1)
+
+
+def cache_stats(T, pos, st, y, win=256):
+    """キャッシュ: 直近 win 語 (同じ文書内) に 実際の語 y が何回出たか と 窓の長さ。 -> (cnt, wl)"""
+    pos = np.asarray(pos, np.int64); d = np.searchsorted(st.docs, pos, side='right') - 1; S = st.docs[np.maximum(d, 0)]
+    cnt = np.zeros(len(pos), np.int32); wl = np.minimum(win, pos - S - 1).astype(np.int32); ar = np.arange(1, win + 1); B = 20000
+    for a in range(0, len(pos), B):
+        sl = slice(a, min(len(pos), a + B)); p = pos[sl]; idx = p[:, None] - ar[None, :]; ok = idx > S[sl][:, None]
+        W = np.where(ok, np.asarray(T[np.clip(idx, 0, len(T) - 1)]).astype(np.int32), -1)
+        cnt[sl] = (W == np.asarray(y)[sl][:, None]).sum(1)
+    return cnt, wl
+
+
+class CacheMix:
+    """LM と キャッシュの補間。 補間の割合は (LM の自信度, 窓の長さ) の区分ごとに、 検証データで格子探索 (勾配なし)"""
+    GRID = np.r_[0, 0.01, 0.02, 0.04, 0.07, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.65]
+
+    @staticmethod
+    def bins(plm, wl):
+        b1 = np.clip((-np.log2(np.maximum(plm, 1e-12)) // 2).astype(int), 0, 7); b2 = np.digitize(wl, [8, 32, 96, 192]); return b1 * 5 + b2
+
+    def fit(self, plm, cnt, wl):
+        b = self.bins(plm, wl); pc = np.where(wl > 0, cnt / np.maximum(wl, 1), 0.0); self.lam = np.zeros(8 * 5)
+        for k in range(8 * 5):
+            m = b == k
+            if m.sum() < 200: continue
+            ll = [np.log2((1 - g) * plm[m] + g * pc[m]).mean() if True else 0 for g in self.GRID]
+            self.lam[k] = self.GRID[int(np.argmax(ll))]
+        return self
+
+    def apply(self, plm, cnt, wl):
+        b = self.bins(plm, wl); g = np.where(wl > 0, self.lam[b], 0.0); pc = np.where(wl > 0, cnt / np.maximum(wl, 1), 0.0)
+        return (1 - g) * plm + g * pc
