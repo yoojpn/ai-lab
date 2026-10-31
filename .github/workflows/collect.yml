@@ -52,3 +52,7 @@ jobs:
         if: env.TASK == 'dialog_aozora' && matrix.idx == 0
         working-directory: hdc
         run: python3 collect_dialog.py "{\"source\":\"aozora\",\"out\":\"/tmp/out\",\"upload\":\"Youichi1/ai-lab-data\"}"
+      - name: stackexchange
+        if: env.TASK == 'stackexchange'
+        working-directory: hdc
+        run: python3 collect_se.py "{\"idx\":$IDX,\"n\":$NSH,\"top\":120,\"cap_mb\":120,\"out\":\"/tmp/se\",\"upload\":\"Youichi1/ai-lab-data\"}"
