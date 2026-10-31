@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       task:
-        description: 'dialog_gutenberg | dialog_aozora | stackexchange | code_crates | code_npm'
+        description: 'dialog_gutenberg | dialog_aozora | stackexchange | code_crates | code_npm | code_ruby'
         required: true
         default: 'dialog_gutenberg'
       shards:
@@ -56,3 +56,15 @@ jobs:
         if: env.TASK == 'stackexchange'
         working-directory: hdc
         run: python3 collect_se.py "{\"idx\":$IDX,\"n\":$NSH,\"top\":120,\"cap_mb\":120,\"out\":\"/tmp/se\",\"upload\":\"Youichi1/ai-lab-data\"}"
+      - name: code_npm
+        if: env.TASK == 'code_npm'
+        working-directory: hdc
+        run: python3 collect_reg.py "{\"reg\":\"npm\",\"top\":10000,\"idx\":$IDX,\"n\":$NSH,\"out\":\"/tmp/reg\",\"upload\":\"Youichi1/ai-lab-data\"}"
+      - name: code_crates
+        if: env.TASK == 'code_crates'
+        working-directory: hdc
+        run: python3 collect_reg.py "{\"reg\":\"crates\",\"top\":3000,\"idx\":$IDX,\"n\":$NSH,\"out\":\"/tmp/reg\",\"upload\":\"Youichi1/ai-lab-data\"}"
+      - name: code_ruby
+        if: env.TASK == 'code_ruby'
+        working-directory: hdc
+        run: python3 collect_reg.py "{\"reg\":\"ruby\",\"top\":4000,\"idx\":$IDX,\"n\":$NSH,\"out\":\"/tmp/reg\",\"upload\":\"Youichi1/ai-lab-data\"}"
