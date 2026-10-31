@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       task:
-        description: 'dialog_gutenberg | dialog_aozora | stackexchange | code_crates | code_npm | code_ruby'
+        description: 'dialog_gutenberg | dialog_aozora | stackexchange | code_crates | code_npm | code_ruby | gh_c | gh_other'
         required: true
         default: 'dialog_gutenberg'
       shards:
@@ -68,3 +68,15 @@ jobs:
         if: env.TASK == 'code_ruby'
         working-directory: hdc
         run: python3 collect_reg.py "{\"reg\":\"ruby\",\"top\":4000,\"idx\":$IDX,\"n\":$NSH,\"out\":\"/tmp/reg\",\"upload\":\"Youichi1/ai-lab-data\"}"
+      - name: gh_c
+        if: env.TASK == 'gh_c'
+        working-directory: hdc
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 collect_gh.py "{\"langs\":[\"C\",\"C++\"],\"idx\":$IDX,\"n\":$NSH,\"out\":\"/tmp/gh\",\"upload\":\"Youichi1/ai-lab-data\"}"
+      - name: gh_other
+        if: env.TASK == 'gh_other'
+        working-directory: hdc
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 collect_gh.py "{\"langs\":[\"Go\",\"Java\",\"C#\",\"PHP\",\"TypeScript\",\"Kotlin\",\"Swift\"],\"idx\":$IDX,\"n\":$NSH,\"out\":\"/tmp/gh\",\"upload\":\"Youichi1/ai-lab-data\"}"
