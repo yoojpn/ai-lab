@@ -99,15 +99,26 @@ def main(cfg):
         for must in ('ja.stackoverflow.com', 'japanese.stackexchange.com', 'chinese.stackexchange.com'):
             if must not in names and any(n == must for _, n in fs): names.append(must)
         cfg['sites'] = names[cfg['idx']::cfg['n']]; log('担当 %d サイト: %s' % (len(cfg['sites']), cfg['sites']))
+    have = set()
+    if cfg.get('upload'):
+        from huggingface_hub import HfApi
+        api = HfApi(token=os.environ['HF_TOKEN']); api.create_repo(cfg['upload'], repo_type='dataset', private=True, exist_ok=True)
+        try: have = {os.path.basename(f.path)[:-9] for f in api.list_repo_tree(cfg['upload'], repo_type='dataset', path_in_repo='qa')}
+        except Exception: have = set()
+        log('HF に既にあるサイト %d' % len(have))
     for site in cfg['sites']:
+        if site in have: log('スキップ(既に有り) %s' % site); continue
         try:
             out, st = do_site(site, cfg.get('cap_mb', 120), cfg['out'], log); stats.append(st)
-            if cfg.get('upload'):
-                from huggingface_hub import HfApi
-                api = HfApi(token=os.environ['HF_TOKEN']); api.create_repo(cfg['upload'], repo_type='dataset', private=True, exist_ok=True)
-                api.upload_file(path_or_fileobj=out, path_in_repo='qa/' + os.path.basename(out), repo_id=cfg['upload'], repo_type='dataset', commit_message='add qa/' + os.path.basename(out)); os.remove(out)
         except Exception as ex:
             log('失敗 %s: %r' % (site, ex))
+    if cfg.get('upload') and stats:
+        for k in range(8):
+            try:
+                api.upload_folder(folder_path=cfg['out'], path_in_repo='qa', repo_id=cfg['upload'], repo_type='dataset', allow_patterns=['*.jsonl.gz'], commit_message='add qa shard %s' % cfg.get('idx'))
+                log('uploaded qa %d サイト' % len(stats)); break
+            except Exception as ex:
+                log('upload 再試行 %d: %r' % (k, str(ex)[:120])); time.sleep(60 * (k + 1))
     print('RESULT_SE ' + json.dumps(stats))
 
 
