@@ -107,33 +107,55 @@ def build_X(pf, B=20_000_000):
     fX.close()
 
 
+def build_K(pf, B=20_000_000):
+    """文脈ごとの 残った項目の数 Tk"""
+    k = np.memmap(pf + '_k.bin', dtype=np.uint64, mode='r'); n = len(k); fK = open(pf + '_K.bin', 'wb'); s = 0
+    while s < n:
+        e = min(n, s + B); ctx = np.asarray(k[s:e]) >> np.uint64(16)
+        if e < n:
+            cut = int(np.searchsorted(ctx, ctx[-1], side='left')); ctx = ctx[:cut]; e = s + cut
+        st = np.r_[0, np.flatnonzero(ctx[1:] != ctx[:-1]) + 1]; np.diff(np.r_[st, len(ctx)]).astype(np.float32).tofile(fK); s = e
+    fK.close()
+
+
 class Model:
     """最終表はディスク上のメモリマップで引く (メモリ節約)"""
-    def __init__(self, prefix_by_order, V=VOC):
-        self.orders = sorted(prefix_by_order); self.V = V; self.t = {}
+    def __init__(self, prefix_by_order, V=VOC, smooth='wb', D=0.8, kn_uni=True, lam=1.0, kn_base=False):
+        self.orders = sorted(prefix_by_order); self.V = V; self.t = {}; self.smooth = smooth; self.kn_base = kn_base; self.lam = lam if isinstance(lam, dict) else {n: lam for n in prefix_by_order}; self.D = D if isinstance(D, dict) else {n: D for n in prefix_by_order}
         for n, pf in prefix_by_order.items():
             if not os.path.exists(pf + '_uc.bin'):
                 build_ctx_tables(pf)
             if not os.path.exists(pf + '_X.bin'):
                 build_X(pf)
+            if not os.path.exists(pf + '_K.bin'):
+                build_K(pf)
             mm = lambda suf, dt: np.memmap(pf + suf, dtype=dt, mode='r')
-            self.t[n] = dict(k=mm('_k.bin', np.uint64), c=mm('_c.bin', np.uint32), uc=mm('_uc.bin', np.uint64), N=mm('_N.bin', np.float32), T=mm('_T.bin', np.float32), X=mm('_X.bin', np.float32))
+            self.t[n] = dict(k=mm('_k.bin', np.uint64), c=mm('_c.bin', np.uint32), uc=mm('_uc.bin', np.uint64), N=mm('_N.bin', np.float32), T=mm('_T.bin', np.float32), X=mm('_X.bin', np.float32), K=mm('_K.bin', np.float32))
         t1 = self.t[1]; self.uni = np.zeros(V); self.uni[(np.asarray(t1['k']) & np.uint64(0xFFFF)).astype(np.int64)] = np.asarray(t1['c']); self.uni_p = (self.uni + 1) / (self.uni.sum() + V)
+        if kn_uni and 2 in self.t:                                   # KN: 一番下は「何種類の語のあとに来たか」(2-gram の種類数)
+            cont = np.bincount((np.asarray(self.t[2]['k']) & np.uint64(0xFFFF)).astype(np.int64), minlength=V).astype(np.float64); self.cont_p = (cont + 0.5) / (cont.sum() + 0.5 * V)
+        else:
+            self.cont_p = self.uni_p
 
     def logprob(self, tok_padded, lo, hi):
         """tok_padded: uint16 (先頭に 8 語の余白)。 位置 [lo,hi) の 各語の確率"""
         return self.logprob_at(tok_padded, np.arange(lo, hi))
 
-    def logprob_at(self, tok_padded, idx):
+    def logprob_at(self, tok_padded, idx, return_hi=False):
         """任意の位置 idx (配列) の 実際の語の log2 確率"""
         idx = np.asarray(idx, np.int64); nxt = tok_padded[idx].astype(np.uint64)
-        P = self.uni_p[tok_padded[idx].astype(np.int64)]
+        P = (self.cont_p if (self.smooth == 'ad' or self.kn_base) else self.uni_p)[tok_padded[idx].astype(np.int64)]
+        hi = np.ones(len(idx), np.int8)
         for n in self.orders:
             if n == 1:
                 continue
             h = ctx_hash(tok_padded, idx, n - 1, n); key = (h << np.uint64(16)) | nxt; t = self.t[n]
             i = np.minimum(np.searchsorted(t['k'], key), len(t['k']) - 1); cnt = np.where(t['k'][i] == key, t['c'][i].astype(np.float64), 0.0)
-            j = np.minimum(np.searchsorted(t['uc'], h), len(t['uc']) - 1); seen = t['uc'][j] == h
+            j = np.minimum(np.searchsorted(t['uc'], h), len(t['uc']) - 1); seen = t['uc'][j] == h; hi = np.where(seen, n, hi).astype(np.int8)
             N = np.where(seen, t['N'][j].astype(np.float64), 0.0); T = np.where(seen, t['T'][j].astype(np.float64), 0.0); X = np.where(seen, t['X'][j].astype(np.float64), 0.0)
-            P = np.where(seen, (cnt + (T + X) * P) / np.maximum(N + T, 1e-9), P)
-        return np.log2(P)
+            if self.smooth == 'ad':
+                Dn = self.D[n]; Tk = np.where(seen, t['K'][j].astype(np.float64), 0.0)
+                P = np.where(seen, (np.maximum(cnt - Dn, 0.0) + (X + Dn * Tk) * P) / np.maximum(N, 1e-9), P)
+            else:
+                lm_ = self.lam[n]; P = np.where(seen, (cnt + lm_ * (T + X) * P) / np.maximum(N - X + lm_ * (T + X), 1e-9), P)
+        return (np.log2(P), hi) if return_hi else np.log2(P)
