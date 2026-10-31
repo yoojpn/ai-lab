@@ -73,26 +73,44 @@ def merge(runs_n, out_prefix, minc, max_range_entries, log):
     return nkeep
 
 
+def build_ctx_tables(pf, B=20_000_000):
+    """最終表から 文脈ごとの (文脈ハッシュ uc, 総数 N, 種類数 T) をディスクに作る (メモリは 1 ブロックぶん)"""
+    k = np.memmap(pf + '_k.bin', dtype=np.uint64, mode='r'); c = np.memmap(pf + '_c.bin', dtype=np.uint32, mode='r'); n = len(k)
+    fu = open(pf + '_uc.bin', 'wb'); fN = open(pf + '_N.bin', 'wb'); fT = open(pf + '_T.bin', 'wb'); s = 0
+    while s < n:
+        e = min(n, s + B); ctx = np.asarray(k[s:e]) >> np.uint64(16)
+        if e < n:
+            cut = int(np.searchsorted(ctx, ctx[-1], side='left')); ctx = ctx[:cut]; e = s + cut
+        cc = np.asarray(c[s:e]).astype(np.uint64); st = np.r_[0, np.flatnonzero(ctx[1:] != ctx[:-1]) + 1]
+        ctx[st].tofile(fu); np.add.reduceat(cc, st).astype(np.float32).tofile(fN); np.diff(np.r_[st, len(ctx)]).astype(np.float32).tofile(fT); s = e
+    fu.close(); fN.close(); fT.close()
+
+
 class Model:
+    """最終表はディスク上のメモリマップで引く (メモリ節約)"""
     def __init__(self, prefix_by_order, V=VOC):
         self.orders = sorted(prefix_by_order); self.V = V; self.t = {}
         for n, pf in prefix_by_order.items():
-            k = np.fromfile(pf + '_k.bin', dtype=np.uint64); c = np.fromfile(pf + '_c.bin', dtype=np.uint32)
-            ctx = k >> np.uint64(16); st = np.r_[0, np.flatnonzero(ctx[1:] != ctx[:-1]) + 1]
-            Nc = np.add.reduceat(c.astype(np.uint64), st).astype(np.float64); T = np.diff(np.r_[st, len(k)]).astype(np.float64)
-            self.t[n] = dict(k=k, c=c.astype(np.float64), uc=ctx[st], N=Nc, T=T)
-        c1 = self.t[1]; self.uni = np.zeros(V); self.uni[(c1['k'] & np.uint64(0xFFFF)).astype(np.int64)] = c1['c']; self.uni_p = (self.uni + 1) / (self.uni.sum() + V)
+            if not os.path.exists(pf + '_uc.bin'):
+                build_ctx_tables(pf)
+            mm = lambda suf, dt: np.memmap(pf + suf, dtype=dt, mode='r')
+            self.t[n] = dict(k=mm('_k.bin', np.uint64), c=mm('_c.bin', np.uint32), uc=mm('_uc.bin', np.uint64), N=mm('_N.bin', np.float32), T=mm('_T.bin', np.float32))
+        t1 = self.t[1]; self.uni = np.zeros(V); self.uni[(np.asarray(t1['k']) & np.uint64(0xFFFF)).astype(np.int64)] = np.asarray(t1['c']); self.uni_p = (self.uni + 1) / (self.uni.sum() + V)
 
     def logprob(self, tok_padded, lo, hi):
         """tok_padded: uint16 (先頭に 8 語の余白)。 位置 [lo,hi) の 各語の確率"""
-        idx = np.arange(lo, hi); nxt = tok_padded[idx].astype(np.uint64)
+        return self.logprob_at(tok_padded, np.arange(lo, hi))
+
+    def logprob_at(self, tok_padded, idx):
+        """任意の位置 idx (配列) の 実際の語の log2 確率"""
+        idx = np.asarray(idx, np.int64); nxt = tok_padded[idx].astype(np.uint64)
         P = self.uni_p[tok_padded[idx].astype(np.int64)]
         for n in self.orders:
             if n == 1:
                 continue
             h = ctx_hash(tok_padded, idx, n - 1, n); key = (h << np.uint64(16)) | nxt; t = self.t[n]
-            i = np.minimum(np.searchsorted(t['k'], key), len(t['k']) - 1); cnt = np.where(t['k'][i] == key, t['c'][i], 0.0)
+            i = np.minimum(np.searchsorted(t['k'], key), len(t['k']) - 1); cnt = np.where(t['k'][i] == key, t['c'][i].astype(np.float64), 0.0)
             j = np.minimum(np.searchsorted(t['uc'], h), len(t['uc']) - 1); seen = t['uc'][j] == h
-            N = np.where(seen, t['N'][j], 0.0); T = np.where(seen, t['T'][j], 0.0)
+            N = np.where(seen, t['N'][j].astype(np.float64), 0.0); T = np.where(seen, t['T'][j].astype(np.float64), 0.0)
             P = np.where(seen, (cnt + T * P) / np.maximum(N + T, 1e-9), P)
         return np.log2(P)
