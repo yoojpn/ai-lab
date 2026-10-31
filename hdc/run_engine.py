@@ -33,8 +33,9 @@ def main(cfg):
     tk.train_from_iterator(docs[:3000],tr); log('BPE 語彙 %d'%tk.get_vocab_size())
     def enc(ds):
         out=[np.zeros(8,np.uint16)]
-        for e in tk.encode_batch(ds):
-            out.append(np.array(e.ids,np.uint16)); out.append(np.zeros(1,np.uint16))
+        for a in range(0,len(ds),200):
+            for e in tk.encode_batch(ds[a:a+200]):
+                out.append(np.array(e.ids,np.uint16)); out.append(np.zeros(1,np.uint16))
         return np.concatenate(out)
     T=enc(docs); T.tofile(W+'/train.tok'); ntrain=len(T)-8
     log('学習の語数 %d (%.2f バイト/語) 符号化 %.0f 秒'%(ntrain,nb/ntrain,time.time()-t0))
