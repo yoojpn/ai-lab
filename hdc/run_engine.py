@@ -67,7 +67,7 @@ def main(cfg):
     vals=list(outs.values()); same=all(abs(v[k]-vals[0][k])<1e-9 for v in vals for k in v); log('chunk を変えても一致: %s'%same)
     # (3) データ量
     curve=[]
-    for target in [3e5,1e6,3e6,1e7,3e7,1e8]:
+    for target in [3e5,1e6,3e6,1e7,3e7,ntrain]:
         if target>ntrain*1.02: break
         n_=int(target); pf,st=build(n_,cfg.get('chunk',8_000_000),'s%d'%n_); s=score(pf)
         curve.append(dict(tokens=n_,**{k:float(v) for k,v in s.items()},spill_gb=st['spill_bytes']/1e9,final_gb=st['final_bytes']/1e9,spill_s=st['spill_s'],merge_s=st['merge_s']))
