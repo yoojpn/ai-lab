@@ -19,6 +19,8 @@ def main(cfg):
         (test if h==0 else train if h>1 else []).append(f)
     extra=sorted(glob.glob('/usr/local/lib/python3.13/dist-packages/**/*.py',recursive=True))
     rng=np.random.default_rng(0); rng.shuffle(extra); rng.shuffle(train)
+    if cfg.get('domain')=='extra':
+        test=extra[:150]; extra=extra[150:]; train=[]
     docs=[];n=0
     for f in train+extra:
         tk=toks_of(f)
