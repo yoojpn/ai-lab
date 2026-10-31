@@ -56,7 +56,7 @@ def merge(runs_n, out_prefix, minc, max_range_entries, log):
     samp = np.sort(np.concatenate([np.asarray(k[::max(1, len(k) // 20000)]) for k in ks]))
     sh = np.uint64(16)
     cuts = [np.uint64(0)] + [(samp[int(len(samp) * i / R)] >> sh) << sh for i in range(1, R)] + [None]
-    fk = open(out_prefix + '_k.bin', 'wb'); fc = open(out_prefix + '_c.bin', 'wb'); fu = open(out_prefix + '_uc.bin', 'wb'); fN = open(out_prefix + '_N.bin', 'wb'); fT = open(out_prefix + '_T.bin', 'wb'); nkeep = 0
+    fk = open(out_prefix + '_k.bin', 'wb'); fc = open(out_prefix + '_c.bin', 'wb'); fu = open(out_prefix + '_uc.bin', 'wb'); fN = open(out_prefix + '_N.bin', 'wb'); fT = open(out_prefix + '_T.bin', 'wb'); fX = open(out_prefix + '_X.bin', 'wb'); nkeep = 0
     for r in range(R):
         a, b = cuts[r], cuts[r + 1]; parts_k = []; parts_c = []
         for k, c in zip(ks, cs):
@@ -72,10 +72,11 @@ def merge(runs_n, out_prefix, minc, max_range_entries, log):
         ctx = u >> sh; cst = np.r_[0, np.flatnonzero(ctx[1:] != ctx[:-1]) + 1]
         keep = s_ >= minc
         Nfull = np.add.reduceat(s_, cst); Tfull = np.diff(np.r_[cst, len(u)]); has = np.add.reduceat(keep.astype(np.int64), cst) > 0
-        ctx[cst][has].tofile(fu); Nfull[has].astype(np.float32).tofile(fN); Tfull[has].astype(np.float32).tofile(fT)
+        Nk = np.add.reduceat(np.where(keep, s_, 0), cst)
+        ctx[cst][has].tofile(fu); Nfull[has].astype(np.float32).tofile(fN); Tfull[has].astype(np.float32).tofile(fT); (Nfull - Nk)[has].astype(np.float32).tofile(fX)
         u = u[keep]; s_ = np.minimum(s_[keep], 2 ** 32 - 1).astype(np.uint32)
         u.tofile(fk); s_.tofile(fc); nkeep += len(u)
-    for f in (fk, fc, fu, fN, fT): f.close()
+    for f in (fk, fc, fu, fN, fT, fX): f.close()
     log('併合 %d 項目 -> %d 項目 (範囲 %d, しきい値 %d)' % (total, nkeep, R, minc))
     return nkeep
 
@@ -93,6 +94,19 @@ def build_ctx_tables(pf, B=20_000_000):
     fu.close(); fN.close(); fT.close()
 
 
+def build_X(pf, B=20_000_000):
+    """既存の最終表から、 文脈ごとの「捨てた質量」 X = N - (残った項目の合計) を作る"""
+    k = np.memmap(pf + '_k.bin', dtype=np.uint64, mode='r'); c = np.memmap(pf + '_c.bin', dtype=np.uint32, mode='r'); N = np.memmap(pf + '_N.bin', dtype=np.float32, mode='r'); n = len(k)
+    fX = open(pf + '_X.bin', 'wb'); s = 0; ci = 0
+    while s < n:
+        e = min(n, s + B); ctx = np.asarray(k[s:e]) >> np.uint64(16)
+        if e < n:
+            cut = int(np.searchsorted(ctx, ctx[-1], side='left')); ctx = ctx[:cut]; e = s + cut
+        st = np.r_[0, np.flatnonzero(ctx[1:] != ctx[:-1]) + 1]; Nk = np.add.reduceat(np.asarray(c[s:e]).astype(np.uint64), st).astype(np.float64)
+        (np.asarray(N[ci:ci + len(st)]).astype(np.float64) - Nk).astype(np.float32).tofile(fX); ci += len(st); s = e
+    fX.close()
+
+
 class Model:
     """最終表はディスク上のメモリマップで引く (メモリ節約)"""
     def __init__(self, prefix_by_order, V=VOC):
@@ -100,8 +114,10 @@ class Model:
         for n, pf in prefix_by_order.items():
             if not os.path.exists(pf + '_uc.bin'):
                 build_ctx_tables(pf)
+            if not os.path.exists(pf + '_X.bin'):
+                build_X(pf)
             mm = lambda suf, dt: np.memmap(pf + suf, dtype=dt, mode='r')
-            self.t[n] = dict(k=mm('_k.bin', np.uint64), c=mm('_c.bin', np.uint32), uc=mm('_uc.bin', np.uint64), N=mm('_N.bin', np.float32), T=mm('_T.bin', np.float32))
+            self.t[n] = dict(k=mm('_k.bin', np.uint64), c=mm('_c.bin', np.uint32), uc=mm('_uc.bin', np.uint64), N=mm('_N.bin', np.float32), T=mm('_T.bin', np.float32), X=mm('_X.bin', np.float32))
         t1 = self.t[1]; self.uni = np.zeros(V); self.uni[(np.asarray(t1['k']) & np.uint64(0xFFFF)).astype(np.int64)] = np.asarray(t1['c']); self.uni_p = (self.uni + 1) / (self.uni.sum() + V)
 
     def logprob(self, tok_padded, lo, hi):
@@ -118,6 +134,6 @@ class Model:
             h = ctx_hash(tok_padded, idx, n - 1, n); key = (h << np.uint64(16)) | nxt; t = self.t[n]
             i = np.minimum(np.searchsorted(t['k'], key), len(t['k']) - 1); cnt = np.where(t['k'][i] == key, t['c'][i].astype(np.float64), 0.0)
             j = np.minimum(np.searchsorted(t['uc'], h), len(t['uc']) - 1); seen = t['uc'][j] == h
-            N = np.where(seen, t['N'][j].astype(np.float64), 0.0); T = np.where(seen, t['T'][j].astype(np.float64), 0.0)
-            P = np.where(seen, (cnt + T * P) / np.maximum(N + T, 1e-9), P)
+            N = np.where(seen, t['N'][j].astype(np.float64), 0.0); T = np.where(seen, t['T'][j].astype(np.float64), 0.0); X = np.where(seen, t['X'][j].astype(np.float64), 0.0)
+            P = np.where(seen, (cnt + (T + X) * P) / np.maximum(N + T, 1e-9), P)
         return np.log2(P)
