@@ -1,0 +1,50 @@
+name: lab
+# 実験を Actions で並列に流す。 HF の tok/ (トークン化済み + 5-gram の表) を取って、 指定した実験を走らせる。 結果は artifact と HF の results/ に置く。
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: 'JSON 配列: [{"name":"..","script":"exp_lat.py","cfg":{...}}, ...]'
+        required: true
+      tokdir:
+        description: 'HF 上のトークン化データの場所'
+        default: 'tok'
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.jobs) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: ディスクを空ける
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy scipy scikit-learn tokenizers huggingface_hub
+      - name: データを取る
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python3 - <<'P'
+          import os
+          from huggingface_hub import snapshot_download
+          snapshot_download('Youichi1/ai-lab-data', repo_type='dataset', allow_patterns=['${{ inputs.tokdir }}/*'], local_dir='/tmp/hfd', token=os.environ['HF_TOKEN'])
+          P
+          rm -rf /tmp/tok && mv /tmp/hfd/${{ inputs.tokdir }} /tmp/tok && ls -la /tmp/tok | head -40
+      - name: run
+        working-directory: hdc
+        shell: bash
+        run: |
+          cat > /tmp/cfg.json <<'J'
+          ${{ toJSON(matrix.cfg) }}
+          J
+          python3 ${{ matrix.script }} "$(cat /tmp/cfg.json)" 2>&1 | tee ../out_${{ matrix.name }}.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ matrix.name }}
+          path: out_${{ matrix.name }}.log
