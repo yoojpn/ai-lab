@@ -24,7 +24,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install numpy scipy scikit-learn tokenizers huggingface_hub
+      - run: |
+          pip install numpy scipy scikit-learn tokenizers huggingface_hub
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
       - name: データを取る
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
