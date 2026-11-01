@@ -18,11 +18,15 @@ def main(cfg):
     alpha = cfg.get('alpha', 0.1); beta = cfg.get('beta', 0.01)
     Ttr = np.memmap(W + '/train.bin', dtype=np.uint16, mode='r'); nb = 40; bl = nidx // nb; starts = np.linspace(8, len(Ttr) - bl - 8, nb).astype(np.int64)
     S = np.concatenate([np.zeros(8, np.uint16)] + [np.asarray(Ttr[s:s + bl]) for s in starts]); N = len(S)
-    lam = {2: 2.0, 3: 3.0, 4: 4.5, 5: 3.0}; M = E.Model({n: '%s/final_o%d' % (D, n) for n in (1, 2, 3, 4, 5)}, smooth='wb', lam=lam, kn_base=True)
+    if cfg.get('full'):
+        lam = {int(k): v for k, v in json.load(open(W + '/lam.json')).items()}; M = E.Model({n: '%s/final_o%d' % (W, n) for n in (1, 2, 3, 4, 5)}, smooth='wb', lam=lam, kn_base=True)
+    else:
+        lam = {2: 2.0, 3: 3.0, 4: 4.5, 5: 3.0}; M = E.Model({n: '%s/final_o%d' % (D, n) for n in (1, 2, 3, 4, 5)}, smooth='wb', lam=lam, kn_base=True)
     freq = np.bincount(S.astype(np.int64), minlength=V); freq[:3] = 0; ids = np.argsort(-freq, kind='stable')[:Vc]; ids = ids[freq[ids] > 0]; Vc = len(ids)
     rank = np.full(V + 1, Vc, np.int64); rank[ids] = np.arange(Vc); r = rank[S.astype(np.int64)]        # 圏外は Vc
-    pos = rng.integers(8 + K, N, int(ntr * 1.2)); pos = pos[r[pos] < Vc][:ntr]; n = len(pos)
-    X = np.stack([r[pos - k] for k in range(1, K + 1)], axis=1); Y = r[pos]; lg('学習行 %d, 語彙 %d, K=%d, Z=%d' % (n, Vc, K, Z))
+    Tsrc = Ttr if cfg.get('full') else S
+    pos = np.sort(rng.integers(8 + K, len(Tsrc), int(ntr * 1.2))); ya = rank[np.asarray(Tsrc[pos]).astype(np.int64)]; pos = pos[ya < Vc][:ntr]; n = len(pos)
+    X = np.stack([rank[np.asarray(Tsrc[pos - k]).astype(np.int64)] for k in range(1, K + 1)], axis=1); Y = rank[np.asarray(Tsrc[pos]).astype(np.int64)]; lg('学習行 %d, 語彙 %d, K=%d, Z=%d, ベース=%s' % (n, Vc, K, Z, '3.8億語 5-gram' if cfg.get('full') else '1000万語 5-gram'))
     A = rng.random((K, Vc + 1, Z)).astype(np.float32) + 1.0; A /= A.sum(2, keepdims=True)                       # P(z | 語) ; 行の和 = 1
     Bt = rng.random((Vc, Z)).astype(np.float32) + 1.0; Bt /= Bt.sum(0, keepdims=True)                         # P(語 | z) ; 列の和 = 1
     pi = np.full(K, 1.0 / K, np.float32); CH = 60000
@@ -69,7 +73,7 @@ def main(cfg):
         lg('反復 %d: 学習の対数尤度 %.4f bit/行 (語彙内の語のみ), pi=%s' % (it + 1, -ll / n, np.round(pi, 3).tolist()))
         if (it + 1) % cfg.get('eval_every', 5) == 0 or it + 1 == iters:
             res = evaluate(); lg('  [検証] 反復 %d: n-gram %.4f -> 混合 %.4f 利得 %.4f (対照 %.4f; 上乗せ %.4f) | 初出文脈 %.4f -> %.4f' % (it + 1, res['ngram'], res['mixed'], res['gain'], ctrl['gain'], res['extra_over_control'], res['ngram_unseen'], res['mixed_unseen']))
-    lg('RESULT_LAT ' + json.dumps(dict(cfg=cfg, res=res), ensure_ascii=False)); json.dump(dict(cfg=cfg, res=res), open('/tmp/lat_result_K%d_Z%d.json' % (K, Z), 'w'))
+    lg('RESULT_LAT ' + json.dumps(dict(cfg=cfg, res=res), ensure_ascii=False)); json.dump(dict(cfg=cfg, res=res), open('/tmp/lat_result_K%d_Z%d_n%d_%s.json' % (K, Z, ntr, 'full' if cfg.get('full') else 'sub'), 'w'))
 
 
 if __name__ == '__main__':
