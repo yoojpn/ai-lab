@@ -73,6 +73,7 @@ def main(cfg):
         lg('反復 %d: 学習の対数尤度 %.4f bit/行 (語彙内の語のみ), pi=%s' % (it + 1, -ll / n, np.round(pi, 3).tolist()))
         if (it + 1) % cfg.get('eval_every', 5) == 0 or it + 1 == iters:
             res = evaluate(); lg('  [検証] 反復 %d: n-gram %.4f -> 混合 %.4f 利得 %.4f (対照 %.4f; 上乗せ %.4f) | 初出文脈 %.4f -> %.4f' % (it + 1, res['ngram'], res['mixed'], res['gain'], ctrl['gain'], res['extra_over_control'], res['ngram_unseen'], res['mixed_unseen']))
+    if cfg.get('save'): np.savez(cfg['save'], A=A, Bt=Bt, pi=pi, ids=ids)
     lg('RESULT_LAT ' + json.dumps(dict(cfg=cfg, res=res), ensure_ascii=False)); json.dump(dict(cfg=cfg, res=res), open('/tmp/lat_result_K%d_Z%d_n%d_%s.json' % (K, Z, ntr, 'full' if cfg.get('full') else 'sub'), 'w'))
 
 
