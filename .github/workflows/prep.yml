@@ -27,4 +27,5 @@ jobs:
         working-directory: hdc
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python3 prep_tok.py '{"patterns": ${{ inputs.patterns }}, "dest": "${{ inputs.dest }}"}'
+        run: |
+          python3 prep_tok.py '{"patterns": ${{ inputs.patterns }}, "dest": "${{ inputs.dest }}"}'
