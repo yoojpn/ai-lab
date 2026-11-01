@@ -26,6 +26,35 @@ def main(cfg):
     A = rng.random((K, Vc + 1, Z)).astype(np.float32) + 1.0; A /= A.sum(2, keepdims=True)                       # P(z | 語) ; 行の和 = 1
     Bt = rng.random((Vc, Z)).astype(np.float32) + 1.0; Bt /= Bt.sum(0, keepdims=True)                         # P(語 | z) ; 列の和 = 1
     pi = np.full(K, 1.0 / K, np.float32); CH = 60000
+    def evalset(sp_, nn):
+        T = np.fromfile('%s/%s.bin' % (W, sp_), dtype=np.uint16); p = rng.integers(16 + K, len(T), int(nn * 1.02)); p = p[T[p] != 0][:nn]; return T, p
+    def plat(T, p):
+        rr = rank[T.astype(np.int64)]; yy = rr[p]; out = np.zeros(len(p))
+        for a in range(0, len(p), 20000):
+            sl = slice(a, a + 20000); pp = p[sl]; y_ = yy[sl]; ok = y_ < Vc; acc = np.zeros(len(pp), np.float64)
+            for k in range(K): acc += pi[k] * (A[k][rr[pp - (k + 1)]] * Bt[np.minimum(y_, Vc - 1)]).sum(1)
+            out[sl] = np.where(ok, acc, 0.0)
+        return out
+    parts = {}; evalset_cache = {}
+    for sp_, nn in (('val', cfg['nval']), ('test', cfg['ntest'])):
+        T, p = evalset(sp_, nn); evalset_cache[sp_] = (T, p); lp, hi = M.logprob_at(T, p, return_hi=True); parts[sp_] = [2.0 ** lp, None, hi]
+    G = np.r_[0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7]
+    def bins(pl): return np.clip((-np.log2(np.maximum(pl, 1e-12)) // 2).astype(int), 0, 7)
+    bits = lambda P, m=None: float(-np.log2(P if m is None else P[m]).mean())
+    def mix_eval(lv, lt):
+        pv = parts['val'][0]; bv_ = bins(pv); gbest = np.zeros(8)
+        for b_ in range(8):
+            mm = bv_ == b_
+            if mm.sum() < 200: continue
+            ll_ = [np.log2((1 - g) * pv[mm] + g * lv[mm]).mean() for g in G]; gbest[b_] = G[int(np.argmax(ll_))]
+        pt = parts['test'][0]; gt = gbest[bins(pt)]; Pm = (1 - gt) * pt + gt * lt; unseen = parts['test'][2] <= 2
+        return dict(ngram=bits(pt), mixed=bits(Pm), gain=bits(pt) - bits(Pm), ngram_unseen=bits(pt, unseen), mixed_unseen=bits(Pm, unseen), frac_unseen=float(unseen.mean()), g_by_bin=gbest.tolist())
+    pu = np.bincount(Y, minlength=Vc).astype(np.float64) / n; ctrl_parts = {}
+    for sp_ in ('val', 'test'):
+        T, p = evalset_cache[sp_]; yy = rank[T.astype(np.int64)][p]; ctrl_parts[sp_] = np.where(yy < Vc, pu[np.minimum(yy, Vc - 1)], 0.0)
+    ctrl = mix_eval(ctrl_parts['val'], ctrl_parts['test'])
+    def evaluate():
+        lv = plat(*evalset_cache['val']); lt = plat(*evalset_cache['test']); r_ = mix_eval(lv, lt); r_['frac_in_vocab'] = float((lt > 0).mean()); r_['control_unigram'] = ctrl; r_['extra_over_control'] = r_['gain'] - ctrl['gain']; return r_
     for it in range(iters):
         Aacc = np.zeros_like(A); Bacc = np.zeros((Vc, Z), np.float32); pacc = np.zeros(K); ll = 0.0
         for a in range(0, n, CH):
@@ -38,44 +67,8 @@ def main(cfg):
             Bacc += sparse.csr_matrix((np.ones(m_, np.float32), (ys, ar)), shape=(Vc, m_)) @ Rs
         A = Aacc + alpha / Z; A /= A.sum(2, keepdims=True); Bt = Bacc + beta; Bt /= Bt.sum(0, keepdims=True); pi = (pacc / pacc.sum()).astype(np.float32)
         lg('反復 %d: 学習の対数尤度 %.4f bit/行 (語彙内の語のみ), pi=%s' % (it + 1, -ll / n, np.round(pi, 3).tolist()))
-    # 評価: n-gram との線形補間
-    def evalset(sp_, nn):
-        T = np.fromfile('%s/%s.bin' % (W, sp_), dtype=np.uint16); p = rng.integers(16 + K, len(T), int(nn * 1.02)); p = p[T[p] != 0][:nn]; return T, p
-    def plat(T, p):
-        rr = rank[T.astype(np.int64)]; yy = rr[p]; out = np.zeros(len(p))
-        for a in range(0, len(p), 20000):
-            sl = slice(a, a + 20000); pp = p[sl]; y_ = yy[sl]; ok = y_ < Vc; acc = np.zeros(len(pp), np.float64)
-            for k in range(K): acc += pi[k] * (A[k][rr[pp - (k + 1)]] * Bt[np.minimum(y_, Vc - 1)]).sum(1)
-            out[sl] = np.where(ok, acc, 0.0)
-        return out
-    res = {}
-    parts = {}; evalset_cache = {}
-    for sp_, nn in (('val', cfg['nval']), ('test', cfg['ntest'])):
-        T, p = evalset(sp_, nn); evalset_cache[sp_] = (T, p); lp, hi = M.logprob_at(T, p, return_hi=True); parts[sp_] = (2.0 ** lp, plat(T, p), hi)
-    G = np.r_[0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7]
-    def bins(pl): return np.clip((-np.log2(np.maximum(pl, 1e-12)) // 2).astype(int), 0, 7)
-    bits = lambda P, m=None: float(-np.log2(P if m is None else P[m]).mean())
-    def mix_eval(lv, lt):
-        pv = parts['val'][0]; bv_ = bins(pv); gbest = np.zeros(8)
-        for b_ in range(8):
-            mm = bv_ == b_
-            if mm.sum() < 200: continue
-            ll_ = [np.log2((1 - g) * pv[mm] + g * lv[mm]).mean() for g in G]; gbest[b_] = G[int(np.argmax(ll_))]
-        pt = parts['test'][0]; gt = gbest[bins(pt)]; Pm = (1 - gt) * pt + gt * lt; unseen = parts['test'][2] <= 2
-        return dict(ngram=bits(pt), mixed=bits(Pm), gain=bits(pt) - bits(Pm), ngram_unseen=bits(pt, unseen), mixed_unseen=bits(Pm, unseen), frac_unseen=float(unseen.mean()), g_by_bin=gbest.tolist())
-    res = mix_eval(parts['val'][1], parts['test'][1]); lt = parts['test'][1]
-    res['frac_in_vocab'] = float((lt > 0).mean())
-    pu = np.bincount(Y, minlength=Vc).astype(np.float64) / n
-    def uni(sp_):
-        T = np.fromfile('%s/%s.bin' % (W, sp_), dtype=np.uint16); return T
-    ctrl = {}
-    for sp_ in ('val', 'test'):
-        T = uni(sp_); ppos = None
-    # 対照 (頻度だけ): 同じ位置で P(w)=頻度
-    ctrl_parts = {}
-    for sp_ in ('val', 'test'):
-        T, p = evalset_cache[sp_]; yy = rank[T.astype(np.int64)][p]; ctrl_parts[sp_] = np.where(yy < Vc, pu[np.minimum(yy, Vc - 1)], 0.0)
-    res['control_unigram'] = mix_eval(ctrl_parts['val'], ctrl_parts['test'])
+        if (it + 1) % cfg.get('eval_every', 5) == 0 or it + 1 == iters:
+            res = evaluate(); lg('  [検証] 反復 %d: n-gram %.4f -> 混合 %.4f 利得 %.4f (対照 %.4f; 上乗せ %.4f) | 初出文脈 %.4f -> %.4f' % (it + 1, res['ngram'], res['mixed'], res['gain'], ctrl['gain'], res['extra_over_control'], res['ngram_unseen'], res['mixed_unseen']))
     lg('RESULT_LAT ' + json.dumps(dict(cfg=cfg, res=res), ensure_ascii=False)); json.dump(dict(cfg=cfg, res=res), open('/tmp/lat_result_K%d_Z%d.json' % (K, Z), 'w'))
 
 
