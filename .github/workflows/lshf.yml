@@ -1,0 +1,27 @@
+name: lshf
+# HF の私用データセットの中身(ファイル名と大きさ)を表示するだけ
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install huggingface_hub
+      - name: list
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python3 - <<'P'
+          import os, collections
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ['HF_TOKEN'])
+          info = api.dataset_info('Youichi1/ai-lab-data', files_metadata=True)
+          agg = collections.defaultdict(lambda: [0, 0])
+          for s in info.siblings:
+              top = '/'.join(s.rfilename.split('/')[:2]); agg[top][0] += 1; agg[top][1] += (s.size or 0)
+          for k, (n, b) in sorted(agg.items()): print('%-40s %6d files %10.1f MB' % (k, n, b / 1e6))
+          P
