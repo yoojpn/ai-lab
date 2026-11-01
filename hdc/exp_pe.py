@@ -55,12 +55,25 @@ def main(cfg):
             ll_ = [np.log2((1 - g) * pv[mm] + g * lv[mm]).mean() for g in G]; gbest[b_] = G[int(np.argmax(ll_))]
         pt = parts['test'][0]; gt = gbest[bins(pt)]; Pm = (1 - gt) * pt + gt * lt; unseen = parts['test'][2] <= 2
         return dict(ngram=bits(pt), mixed=bits(Pm), gain=bits(pt) - bits(Pm), ngram_unseen=bits(pt, unseen), mixed_unseen=bits(Pm, unseen), frac_unseen=float(unseen.mean()), g_by_bin=gbest.tolist())
+    def fit_g(pv, lv):
+        bv_ = bins(pv); gb = np.zeros(8)
+        for b_ in range(8):
+            mm = bv_ == b_
+            if mm.sum() < 200: continue
+            ll_ = [np.log2((1 - g) * pv[mm] + g * lv[mm]).mean() for g in G]; gb[b_] = G[int(np.argmax(ll_))]
+        return gb
+    def mix2(lv, lt):
+        """二段階: (1) n-gram に頻度を混ぜて較正 (2) その上に専門家を混ぜる。 上乗せは (1) の後の値との差"""
+        pv0, pt0 = parts['val'][0], parts['test'][0]; cv, ct = ctrl_parts['val'], ctrl_parts['test']
+        g1 = fit_g(pv0, cv); pv1 = (1 - g1[bins(pv0)]) * pv0 + g1[bins(pv0)] * cv; pt1 = (1 - g1[bins(pt0)]) * pt0 + g1[bins(pt0)] * ct
+        g2 = fit_g(pv1, lv); pt2 = (1 - g2[bins(pt1)]) * pt1 + g2[bins(pt1)] * lt; un = parts['test'][2] <= 2
+        return dict(base=bits(pt1), final=bits(pt2), extra2=bits(pt1) - bits(pt2), base_unseen=bits(pt1, un), final_unseen=bits(pt2, un))
     pu = np.bincount(Y, minlength=Vc).astype(np.float64) / n; ctrl_parts = {}
     for sp_ in ('val', 'test'):
         T, p = evalset_cache[sp_]; yy = rank[T.astype(np.int64)][p]; ctrl_parts[sp_] = np.where(yy < Vc, pu[np.minimum(yy, Vc - 1)], 0.0)
     ctrl = mix_eval(ctrl_parts['val'], ctrl_parts['test'])
     def evaluate():
-        lv = plat(*evalset_cache['val']); lt = plat(*evalset_cache['test']); r_ = mix_eval(lv, lt); r_['frac_in_vocab'] = float((lt > 0).mean()); r_['control_unigram'] = ctrl; r_['extra_over_control'] = r_['gain'] - ctrl['gain']; return r_
+        lv = plat(*evalset_cache['val']); lt = plat(*evalset_cache['test']); r_ = mix_eval(lv, lt); r_['two_stage'] = mix2(lv, lt); lg('    二段階(頻度で較正した n-gram の上): 基準 %.4f -> %.4f 上乗せ %.4f bit | 初出文脈 %.4f -> %.4f' % (r_['two_stage']['base'], r_['two_stage']['final'], r_['two_stage']['extra2'], r_['two_stage']['base_unseen'], r_['two_stage']['final_unseen'])); r_['frac_in_vocab'] = float((lt > 0).mean()); r_['control_unigram'] = ctrl; r_['extra_over_control'] = r_['gain'] - ctrl['gain']; return r_
     for it in range(iters):
         Pacc = np.zeros_like(Pk); Bacc = np.zeros((Vc, Z), np.float32); pacc = np.zeros(Z); ll = 0.0; lBt = np.log(Bt)
         for a in range(0, n, CH):
