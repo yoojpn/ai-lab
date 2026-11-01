@@ -1,0 +1,30 @@
+name: prep
+# 会話の生データ -> トークン化 -> 5-gram の表 -> HF の tok*/ に保存 (実験用ジョブが取りに行く)
+on:
+  workflow_dispatch:
+    inputs:
+      patterns:
+        description: 'HF の取得パターン (JSON 配列)'
+        default: '["dialog/*"]'
+      dest:
+        description: 'HF 上の保存先'
+        default: 'tok'
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - name: ディスクを空ける
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          df -h / | tail -1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy scipy scikit-learn tokenizers huggingface_hub
+      - name: run
+        working-directory: hdc
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python3 prep_tok.py '{"patterns": ${{ inputs.patterns }}, "dest": "${{ inputs.dest }}"}'

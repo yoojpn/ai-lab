@@ -17,11 +17,18 @@ def main(cfg):
         cls = C.learn_classes(T, V, log=log)
         np.savez(W + '/aux.npz', cnt=cnt, fm=fm, cls=cls)
     ORD = [1, 2, 3, 4, 5]; MINC = {1: 1, 2: 1, 3: 2, 4: 2, 5: 2}; rd = W + '/runs'
-    runs = E.spill(W + '/train.bin', nt, rd, ORD, cfg.get('chunk', 8_000_000), log)
-    for n in ORD:
-        E.merge(runs[n], W + '/final_o%d' % n, MINC[n], 20_000_000, log)
-        for a, b in runs[n]: os.remove(a); os.remove(b)
-    shutil.rmtree(rd, ignore_errors=True)
+    if cfg.get('serial'):                                   # 次数を 1 つずつ (一時ファイルのピークを小さく; Actions のディスク対策)
+        for n in ORD:
+            if os.path.exists(W + '/final_o%d_N.bin' % n): log('次数 %d 既存' % n); continue
+            runs = E.spill(W + '/train.bin', nt, rd, [n], cfg.get('chunk', 8_000_000), log)
+            E.merge(runs[n], W + '/final_o%d' % n, MINC[n], 20_000_000, log)
+            shutil.rmtree(rd, ignore_errors=True)
+    else:
+        runs = E.spill(W + '/train.bin', nt, rd, ORD, cfg.get('chunk', 8_000_000), log)
+        for n in ORD:
+            E.merge(runs[n], W + '/final_o%d' % n, MINC[n], 20_000_000, log)
+            for a, b in runs[n]: os.remove(a); os.remove(b)
+        shutil.rmtree(rd, ignore_errors=True)
     log('完了 最終表 %.2f GB' % (sum(os.path.getsize(f) for f in glob.glob(W + '/final_o*')) / 1e9))
 
 
