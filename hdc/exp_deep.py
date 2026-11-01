@@ -65,6 +65,12 @@ def main(cfg):
     Ttr = np.memmap(W + '/train.bin', dtype=np.uint16, mode='r'); nb = 40; bl = ntr // nb; starts = np.linspace(8, len(Ttr) - bl - 8, nb).astype(np.int64)
     S = np.concatenate([np.zeros(c, np.uint16)] + [np.asarray(Ttr[s:s + bl]) for s in starts]).astype(np.int64); N = len(S)
     pos = np.arange(c, N); pos = pos[S[pos] != 0]; rng.shuffle(pos); steps = len(pos) // B
+    # 評価に要るものを 学習の前に確かめる (学習の最後で落ちて 数時間が無駄になるのを防ぐ)
+    lp_ = W + '/lam.json'; lam = {int(a): b for a, b in json.load(open(lp_)).items()} if os.path.exists(lp_) else {2: 2.0, 3: 3.0, 4: 4.5, 5: 3.0}
+    M = E.Model({o: '%s/final_o%d' % (W, o) for o in (1, 2, 3, 4, 5)}, smooth='wb', lam=lam, kn_base=True)
+    for sp_ in ('val', 'test'):
+        assert os.path.exists('%s/%s.bin' % (W, sp_)), sp_
+    _T = np.fromfile(W + '/val.bin', dtype=np.uint16); _p = np.arange(100, 200); M.logprob_at(_T, _p, return_hi=True); lg('事前確認: n-gram 表と lam=%s は使えます' % lam)
     net = Net(d, c, L, n, kk, k); npar = sum(p.numel() for p in net.parameters())
     lg('L=%d d=%d n=%d (行数/層 %d) kk=%d k=%d B=%d 学習語 %d 歩数 %d パラメータ %.1fM' % (L, d, n, n * n, kk, k, B, len(pos), steps, npar / 1e6))
     opt_s = torch.optim.SparseAdam(net.sparse_params(), lr=lrs); opt_d = torch.optim.Adam(net.dense_params(), lr=lr)
@@ -93,8 +99,8 @@ def main(cfg):
             curve.append((st + 1, run / cnt)); lg('歩 %d/%d: 先に予測した損失 %.4f bit/語 (直近) | %.2f 歩/秒' % (st + 1, steps, run / cnt, cfg.get('log_every', 500) / (time.time() - ts))); run = 0.0; cnt = 0; ts = time.time()
         if cfg.get('eval_every') and (st + 1) % cfg['eval_every'] == 0:
             T, p = ev['val']; lg('  [検証 2万語] %.4f bit/語' % (-nn_logp(T, p[:20000]).mean()))
+    lg('ONLINE_DEEP ' + json.dumps(dict(L=L, n=n, steps=steps, curve=curve, last2000=curve[-1][1] if curve else None, last10000=float(np.mean([v for _, v in curve[-5:]])) if curve else None), ensure_ascii=False))
     # ---- 最終評価 ----
-    lam = {int(a): b for a, b in json.load(open(W + '/lam.json')).items()}; M = E.Model({o: '%s/final_o%d' % (W, o) for o in (1, 2, 3, 4, 5)}, smooth='wb', lam=lam, kn_base=True)
     parts = {}
     for sp_ in ('val', 'test'):
         T, p = ev[sp_]; lp, hi = M.logprob_at(T, p, return_hi=True); parts[sp_] = dict(ng=2.0 ** lp, hi=hi, nn=2.0 ** nn_logp(T, p), T=T, p=p)
