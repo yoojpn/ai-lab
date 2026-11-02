@@ -96,6 +96,9 @@ class Net(nn.Module):
         return (1 - g)[:, None] * pm + g[:, None] * pcd
 
 
+DEV = torch.device('cpu')   # main() が cfg の device か、 GPU があれば cuda に切り替える
+
+
 def make_inputs(T, pos, ds, feats, offs8, o1, offs2):
     """T: int64 配列。 pos: 予測する位置 (B,)。 ds: その位置の文書の開始 (B,)。 文書の外は 0 (無効)"""
     inp = {'ctx': torch.from_numpy(T[np.maximum(pos[:, None] - offs8[None], 0)])}
@@ -111,11 +114,12 @@ def make_inputs(T, pos, ds, feats, offs8, o1, offs2):
         j = pos[:, None] - np.arange(1, MC + 1)[None]; v = (j - 2) >= ds[:, None]
         inp['f3_val'] = torch.from_numpy(T[np.maximum(j, 0)] * v); inp['f3_c1'] = torch.from_numpy(T[np.maximum(j - 1, 0)] * v)
         inp['f3_c2'] = torch.from_numpy(T[np.maximum(j - 2, 0)] * v); inp['f3_v'] = torch.from_numpy(v)
-    return inp
+    return {k_: v_.to(DEV) for k_, v_ in inp.items()}
 
 
 def main(cfg):
-    global MC, W2, NS, W1
+    global MC, W2, NS, W1, DEV
+    DEV = torch.device(cfg.get('device') or ('cuda' if torch.cuda.is_available() else 'cpu'))
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
     MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2)
@@ -132,7 +136,7 @@ def main(cfg):
     dsT = np.maximum(Dtr[np.maximum(np.searchsorted(Dtr, ptr, 'right') - 1, 0)], starts[ci]); DS = c + ci * bl + (dsT - starts[ci]); DS[:c] = u[:c]; del u, ci, loc, ptr, dsT
     cnt = np.bincount(S, minlength=V).astype(np.float64); pu = (cnt + 1) / (cnt.sum() + V); rar = -np.log2(pu); rar[0] = 0.0; rar[1] = 0.0
     pos = np.arange(c, N); pos = pos[S[pos] != 0]; rng.shuffle(pos); steps = len(pos) // B
-    net = Net(d, c, L, n, kk, k, feats, rar); npar = sum(p.numel() for p in net.parameters())
+    net = Net(d, c, L, n, kk, k, feats, rar).to(DEV); npar = sum(p.numel() for p in net.parameters())
     lg('L=%d feats=%s B=%d 学習語 %d 歩数 %d パラメータ %.1fM 窓: 部品2=%d 部品3=%d' % (L, feats, B, len(pos), steps, npar / 1e6, W2, MC))
     opt_s = torch.optim.SparseAdam(net.sparse_params(), lr=lrs); opt_d = torch.optim.Adam(net.dense_params(), lr=lr)
 
@@ -140,8 +144,8 @@ def main(cfg):
         out = np.zeros(len(p)); net.eval()
         with torch.no_grad():
             for a in range(0, len(p), bs):
-                pp = p[a:a + bs]; inp = make_inputs(T, pp, ds[a:a + bs], feats, offs8, o1, offs2); y = torch.from_numpy(T[pp])
-                out[a:a + bs] = (net.logp(inp, y) / math.log(2)).numpy()
+                pp = p[a:a + bs]; inp = make_inputs(T, pp, ds[a:a + bs], feats, offs8, o1, offs2); y = torch.from_numpy(T[pp]).to(DEV)
+                out[a:a + bs] = (net.logp(inp, y) / math.log(2)).cpu().numpy()
         net.train(); return out
 
     def load_split(sp_):
@@ -158,7 +162,7 @@ def main(cfg):
         f = min(1.0, (st + 1) / 200) * max(0.1, 1 - st / steps)
         for g in opt_d.param_groups: g['lr'] = lr * f
         for g in opt_s.param_groups: g['lr'] = lrs * f
-        pp = pos[st * B:(st + 1) * B]; inp = make_inputs(S, pp, DS[pp], feats, offs8, o1, offs2); y = torch.from_numpy(S[pp])
+        pp = pos[st * B:(st + 1) * B]; inp = make_inputs(S, pp, DS[pp], feats, offs8, o1, offs2); y = torch.from_numpy(S[pp]).to(DEV)
         loss = -net.logp(inp, y).mean()
         run += loss.item() / math.log(2); cnt_ += 1
         opt_s.zero_grad(); opt_d.zero_grad(); loss.backward(); opt_s.step(); opt_d.step()
