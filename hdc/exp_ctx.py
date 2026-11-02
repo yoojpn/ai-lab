@@ -205,6 +205,21 @@ def main(cfg):
     g1 = fit_g(V_['ng'][mv], V_['uni'][mv]); mix = lambda P, X, g: (1 - g[bins(P)]) * P + g[bins(P)] * X
     pv1 = mix(V_['ng'], V_['uni'], g1); pt1 = mix(T_['ng'], T_['uni'], g1)
     g2 = fit_g(pv1[mv], V_['nn'][mv]); pt2 = mix(pt1, T_['nn'], g2)
+    # ---- 合法な混合: 重みを 「予測する前に分かること」 (n-gram が見つけた最高次数 hi) だけで決める ----
+    # 上の mix は 重みの選び方 (bins) に 『正解の語の n-gram 確率』 を使っている = 答えを見て重みを決めている (漏れ)。 こちらは漏れなし。
+    hv_, ht_ = V_['hi'].astype(int), T_['hi'].astype(int)
+    def fit_ok(pv, lv, hb):
+        gb = np.zeros(6)
+        for b_ in range(1, 6):
+            mm = hb == b_
+            if mm.sum() < 200: continue
+            gb[b_] = G[int(np.argmax([np.log2((1 - g) * pv[mm] + g * lv[mm]).mean() for g in G]))]
+        return gb
+    mixok = lambda P, X, g, hb: (1 - g[hb]) * P + g[hb] * X
+    g1o = fit_ok(V_['ng'][mv], V_['uni'][mv], hv_[mv]); pv1o = mixok(V_['ng'], V_['uni'], g1o, hv_); pt1o = mixok(T_['ng'], T_['uni'], g1o, ht_)
+    g2o = fit_ok(pv1o[mv], V_['nn'][mv], hv_[mv]); pt2o = mixok(pt1o, T_['nn'], g2o, ht_)
+    lg('合法な混合(重みは hi だけで決める): n-gram %.4f -> 較正 %.4f -> 混合 %.4f (上乗せ %.4f) | 長い文脈: 較正 %.4f -> 混合 %.4f (上乗せ %.4f) | 漏れありの上乗せ %.4f' % (
+        bits(T_['ng'][mt]), bits(pt1o[mt]), bits(pt2o[mt]), bits(pt1o[mt]) - bits(pt2o[mt]), bits(pt1o[T_['nmain']:]), bits(pt2o[T_['nmain']:]), bits(pt1o[T_['nmain']:]) - bits(pt2o[T_['nmain']:]), bits(pt1[mt]) - bits(pt2[mt])))
     dep = T_['depth']; un = T_['hi'][mt] <= 2
     buckets = [(0, 8), (8, 64), (64, 512), (512, 10 ** 9)]; per = {}
     for lo, hi_ in buckets:
@@ -212,6 +227,7 @@ def main(cfg):
         if m.sum() >= 200: per['%d-%d' % (lo, hi_)] = dict(n=int(m.sum()), nn=bits(T_['nn'], m), base=bits(pt1, m), final=bits(pt2, m), gain=bits(pt1, m) - bits(pt2, m))
     ml = np.zeros(len(dep), bool); ml[T_['nmain']:] = True
     res = dict(L=L, feats=feats, params_M=npar / 1e6, steps=steps, online_curve=curve, test_nn_bits=bits(T_['nn'][mt]), test_ngram_bits=bits(T_['ng'][mt]), test_base_bits=bits(pt1[mt]), test_final_bits=bits(pt2[mt]), extra2=bits(pt1[mt]) - bits(pt2[mt]),
+               ok=dict(base=bits(pt1o[mt]), final=bits(pt2o[mt]), extra2=bits(pt1o[mt]) - bits(pt2o[mt]), long_base=bits(pt1o[T_['nmain']:]), long_final=bits(pt2o[T_['nmain']:])),
                unseen_frac=float(un.mean()), unseen_nn_bits=bits(T_['nn'][mt], un), unseen_base_bits=bits(pt1[mt], un), unseen_final_bits=bits(pt2[mt], un), by_depth=per,
                long256=dict(n=int(ml.sum()), nn=bits(T_['nn'], ml), ngram=bits(T_['ng'], ml), base=bits(pt1, ml), final=bits(pt2, ml), gain=bits(pt1, ml) - bits(pt2, ml)), train_seconds=time.time() - t0)
     lg('結果: 単独 %.4f | n-gram %.4f -> 較正 %.4f -> 混合 %.4f (上乗せ %.4f) | 初出文脈(%.0f%%) 単独 %.4f' % (res['test_nn_bits'], res['test_ngram_bits'], res['test_base_bits'], res['test_final_bits'], res['extra2'], 100 * res['unseen_frac'], res['unseen_nn_bits']))
