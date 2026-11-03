@@ -14,6 +14,7 @@ import torch.nn.functional as F
 import engine as E
 
 V = 32768
+SPARSE = True    # GPU では False (密な勾配 + LazyAdam)
 W1 = [32, 128, 512, 2048]; NS = 32; W2 = 4096; K2 = 32; MC = 512; DK = 32
 
 
@@ -21,11 +22,11 @@ class Net(nn.Module):
     def __init__(s, d, c, L, n, kk, k, feats, rar):
         super().__init__()
         s.d, s.c, s.L, s.n, s.kk, s.k, s.feats = d, c, L, n, kk, k, feats
-        s.E = nn.Embedding(V, d, sparse=True); nn.init.normal_(s.E.weight, 0, 0.1)
+        s.E = nn.Embedding(V, d, sparse=SPARSE); nn.init.normal_(s.E.weight, 0, 0.1)
         s.P = nn.Parameter(torch.randn(c, d) * 0.1 + 1.0)
         s.K1 = nn.ParameterList([nn.Parameter(torch.randn(n, d // 2) * 0.5) for _ in range(L)])
         s.K2 = nn.ParameterList([nn.Parameter(torch.randn(n, d // 2) * 0.5) for _ in range(L)])
-        s.Val = nn.ModuleList([nn.Embedding(n * n, d, sparse=True) for _ in range(L)])
+        s.Val = nn.ModuleList([nn.Embedding(n * n, d, sparse=SPARSE) for _ in range(L)])
         for v in s.Val: nn.init.normal_(v.weight, 0, 0.02)
         s.tau = nn.Parameter(torch.ones(max(L, 1)))
         s.U = nn.Parameter(torch.randn(V, d) * 0.05)
@@ -33,7 +34,7 @@ class Net(nn.Module):
         if 1 in feats: s.G1 = nn.Parameter(torch.full((len(W1), d), 0.1))
         if 2 in feats: s.G2 = nn.Parameter(torch.full((d,), 0.1))
         if 3 in feats:
-            s.Ek = nn.Embedding(V, DK, sparse=True); nn.init.normal_(s.Ek.weight, 0, 0.3)
+            s.Ek = nn.Embedding(V, DK, sparse=SPARSE); nn.init.normal_(s.Ek.weight, 0, 0.3)
             s.Pk = nn.Parameter(torch.ones(2, DK)); s.theta = nn.Parameter(torch.tensor(8.0)); s.ga = nn.Parameter(torch.tensor(1.0)); s.gb = nn.Parameter(torch.tensor(-2.0))
 
     def sparse_params(s):
@@ -79,7 +80,7 @@ class Net(nn.Module):
         sc = s.theta * (kq @ q[:, :, None])[:, :, 0]
         v = inp['f3_v']; any_ = v.any(1)
         sc = sc.masked_fill(~v, -1e9); a = F.softmax(sc, dim=1) * any_[:, None]
-        mx = sc.max(1).values.clamp(min=-1.0, max=s.theta.detach().abs().item() + 1.0)
+        mx = torch.minimum(sc.max(1).values.clamp_min(-1.0), s.theta.detach().abs() + 1.0)
         g = torch.sigmoid(s.ga * mx + s.gb) * any_
         return a, g
 
@@ -94,6 +95,46 @@ class Net(nn.Module):
         if 3 not in s.feats: return pm
         a, g = s.cache(inp); pcd = torch.zeros_like(pm).scatter_add_(1, inp['f3_val'], a)
         return (1 - g)[:, None] * pm + g[:, None] * pcd
+
+
+class LazyAdam:
+    """SparseAdam と同じ計算 (勾配が 0 でない行だけ更新) を 密な勾配で GPU 上で行う。"""
+    def __init__(s, params, lr, betas=(0.9, 0.999), eps=1e-8):
+        s.param_groups = [{'params': list(params), 'lr': lr}]; s.b1, s.b2 = betas; s.eps = eps; s.t = 0; s.st = {}
+
+    def zero_grad(s):
+        for g in s.param_groups:
+            for p in g['params']: p.grad = None
+
+    @torch.no_grad()
+    def step(s):
+        s.t += 1; bc1 = 1 - s.b1 ** s.t; bc2 = 1 - s.b2 ** s.t
+        for g in s.param_groups:
+            for p in g['params']:
+                G = p.grad
+                if G is None: continue
+                if id(p) not in s.st: s.st[id(p)] = (torch.zeros_like(p), torch.zeros_like(p))
+                m, v = s.st[id(p)]; mask = (G != 0).any(1, keepdim=True)
+                m.copy_(torch.where(mask, s.b1 * m + (1 - s.b1) * G, m)); v.copy_(torch.where(mask, s.b2 * v + (1 - s.b2) * G * G, v))
+                upd = (g['lr'] * math.sqrt(bc2) / bc1) * m / (v.sqrt() + s.eps)
+                p.sub_(torch.where(mask, upd, torch.zeros_like(upd)))
+
+
+def make_inputs_t(T, pos, ds, feats, offs8, o1, offs2):
+    """make_inputs の torch 版 (全部 GPU の上)。 T: long テンソル、 pos/ds: long テンソル、 offs8/o1/offs2: long テンソル"""
+    inp = {'ctx': T[(pos[:, None] - offs8[None]).clamp_min(0)]}
+    if 1 in feats:
+        ids, ms = [], []
+        for o in o1:
+            idx = pos[:, None] - o[None]; v = idx >= ds[:, None]; ids.append(T[idx.clamp_min(0)] * v); ms.append(v)
+        inp['f1_ids'] = torch.stack(ids, 1); inp['f1_m'] = torch.stack(ms, 1).float()
+    if 2 in feats:
+        idx = pos[:, None] - offs2[None]; v = idx >= ds[:, None]
+        inp['f2_ids'] = T[idx.clamp_min(0)] * v; inp['f2_v'] = v
+    if 3 in feats:
+        j = pos[:, None] - torch.arange(1, MC + 1, device=T.device)[None]; v = (j - 2) >= ds[:, None]
+        inp['f3_val'] = T[j.clamp_min(0)] * v; inp['f3_c1'] = T[(j - 1).clamp_min(0)] * v; inp['f3_c2'] = T[(j - 2).clamp_min(0)] * v; inp['f3_v'] = v
+    return inp
 
 
 DEV = torch.device('cpu')   # main() が cfg の device か、 GPU があれば cuda に切り替える
@@ -118,7 +159,7 @@ def make_inputs(T, pos, ds, feats, offs8, o1, offs2):
 
 
 def main(cfg):
-    global MC, W2, NS, W1, DEV
+    global MC, W2, NS, W1, DEV, SPARSE
     DEV = torch.device(cfg.get('device') or ('cuda' if torch.cuda.is_available() else 'cpu'))
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
@@ -136,9 +177,14 @@ def main(cfg):
     dsT = np.maximum(Dtr[np.maximum(np.searchsorted(Dtr, ptr, 'right') - 1, 0)], starts[ci]); DS = c + ci * bl + (dsT - starts[ci]); DS[:c] = u[:c]; del u, ci, loc, ptr, dsT
     cnt = np.bincount(S, minlength=V).astype(np.float64); pu = (cnt + 1) / (cnt.sum() + V); rar = -np.log2(pu); rar[0] = 0.0; rar[1] = 0.0
     pos = np.arange(c, N); pos = pos[S[pos] != 0]; rng.shuffle(pos); steps = len(pos) // B
+    fast = (DEV.type == 'cuda' and int(cfg.get('fast', 1)) == 1) or int(cfg.get('fast', 1)) == 2; SPARSE = not fast   # fast=2: CPU で速い経路の試験
     net = Net(d, c, L, n, kk, k, feats, rar).to(DEV); npar = sum(p.numel() for p in net.parameters())
     lg('L=%d feats=%s B=%d 学習語 %d 歩数 %d パラメータ %.1fM 窓: 部品2=%d 部品3=%d' % (L, feats, B, len(pos), steps, npar / 1e6, W2, MC))
-    opt_s = torch.optim.SparseAdam(net.sparse_params(), lr=lrs); opt_d = torch.optim.Adam(net.dense_params(), lr=lr)
+    opt_s = LazyAdam(net.sparse_params(), lr=lrs) if fast else torch.optim.SparseAdam(net.sparse_params(), lr=lrs); opt_d = torch.optim.Adam(net.dense_params(), lr=lr)
+    if fast:
+        S_t = torch.from_numpy(S).to(DEV); DS_t = torch.from_numpy(DS).to(DEV); pos_t = torch.from_numpy(pos).to(DEV)
+        offs8_t = torch.from_numpy(offs8).to(DEV); o1_t = [torch.from_numpy(o).to(DEV) for o in o1]; offs2_t = torch.from_numpy(offs2).to(DEV)
+        lg('GPU の速い経路: 入力の準備を GPU で行い、 疎な更新は LazyAdam')
 
     def nn_logp(T, p, ds, bs=1024):
         out = np.zeros(len(p)); net.eval()
@@ -162,12 +208,15 @@ def main(cfg):
         f = min(1.0, (st + 1) / 200) * max(0.1, 1 - st / steps)
         for g in opt_d.param_groups: g['lr'] = lr * f
         for g in opt_s.param_groups: g['lr'] = lrs * f
-        pp = pos[st * B:(st + 1) * B]; inp = make_inputs(S, pp, DS[pp], feats, offs8, o1, offs2); y = torch.from_numpy(S[pp]).to(DEV)
+        if fast:
+            pp_t = pos_t[st * B:(st + 1) * B]; inp = make_inputs_t(S_t, pp_t, DS_t[pp_t], feats, offs8_t, o1_t, offs2_t); y = S_t[pp_t]
+        else:
+            pp = pos[st * B:(st + 1) * B]; inp = make_inputs(S, pp, DS[pp], feats, offs8, o1, offs2); y = torch.from_numpy(S[pp]).to(DEV)
         loss = -net.logp(inp, y).mean()
-        run += loss.item() / math.log(2); cnt_ += 1
+        run = run + loss.detach() / math.log(2); cnt_ += 1
         opt_s.zero_grad(); opt_d.zero_grad(); loss.backward(); opt_s.step(); opt_d.step()
         if (st + 1) % cfg.get('log_every', 500) == 0:
-            curve.append((st + 1, run / cnt_)); lg('歩 %d/%d: 先に予測した損失 %.4f bit/語 (直近) | %.2f 歩/秒' % (st + 1, steps, run / cnt_, cfg.get('log_every', 500) / (time.time() - ts))); run = 0.0; cnt_ = 0; ts = time.time()
+            run = float(run); curve.append((st + 1, run / cnt_)); lg('歩 %d/%d: 先に予測した損失 %.4f bit/語 (直近) | %.2f 歩/秒' % (st + 1, steps, run / cnt_, cfg.get('log_every', 500) / (time.time() - ts))); run = 0.0; cnt_ = 0; ts = time.time()
     lg('ONLINE_CTX ' + json.dumps(dict(L=L, feats=feats, steps=steps, curve=curve, last10000=float(np.mean([v for _, v in curve[-5:]])) if curve else None), ensure_ascii=False))
     # ---- 生成サンプル (網だけ。 n-gram は混ぜない) ----
     try:
