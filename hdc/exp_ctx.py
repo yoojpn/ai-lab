@@ -100,7 +100,8 @@ class Net(nn.Module):
 class LazyAdam:
     """SparseAdam と同じ計算 (勾配が 0 でない行だけ更新) を 密な勾配で GPU 上で行う。"""
     def __init__(s, params, lr, betas=(0.9, 0.999), eps=1e-8):
-        s.param_groups = [{'params': list(params), 'lr': lr}]; s.b1, s.b2 = betas; s.eps = eps; s.t = 0; s.st = {}
+        s.param_groups = [{'params': list(params), 'lr': lr}]; s.b1, s.b2 = betas; s.eps = eps; s.st = {}
+        s.t = torch.zeros((), device=s.param_groups[0]['params'][0].device)   # 歩数 (GPU の上のテンソル: CUDA グラフに記録できる)
 
     def zero_grad(s):
         for g in s.param_groups:
@@ -108,7 +109,7 @@ class LazyAdam:
 
     @torch.no_grad()
     def step(s):
-        s.t += 1; bc1 = 1 - s.b1 ** s.t; bc2 = 1 - s.b2 ** s.t
+        s.t.add_(1); bc1 = 1 - s.b1 ** s.t; bc2 = 1 - s.b2 ** s.t
         for g in s.param_groups:
             for p in g['params']:
                 G = p.grad
@@ -116,7 +117,7 @@ class LazyAdam:
                 if id(p) not in s.st: s.st[id(p)] = (torch.zeros_like(p), torch.zeros_like(p))
                 m, v = s.st[id(p)]; mask = (G != 0).any(1, keepdim=True)
                 m.copy_(torch.where(mask, s.b1 * m + (1 - s.b1) * G, m)); v.copy_(torch.where(mask, s.b2 * v + (1 - s.b2) * G * G, v))
-                upd = (g['lr'] * math.sqrt(bc2) / bc1) * m / (v.sqrt() + s.eps)
+                upd = (g['lr'] * bc2.sqrt() / bc1) * m / (v.sqrt() + s.eps)
                 p.sub_(torch.where(mask, upd, torch.zeros_like(upd)))
 
 
@@ -180,7 +181,12 @@ def main(cfg):
     fast = (DEV.type == 'cuda' and int(cfg.get('fast', 1)) == 1) or int(cfg.get('fast', 1)) == 2; SPARSE = not fast   # fast=2: CPU で速い経路の試験
     net = Net(d, c, L, n, kk, k, feats, rar).to(DEV); npar = sum(p.numel() for p in net.parameters())
     lg('L=%d feats=%s B=%d 学習語 %d 歩数 %d パラメータ %.1fM 窓: 部品2=%d 部品3=%d' % (L, feats, B, len(pos), steps, npar / 1e6, W2, MC))
-    opt_s = LazyAdam(net.sparse_params(), lr=lrs) if fast else torch.optim.SparseAdam(net.sparse_params(), lr=lrs); opt_d = torch.optim.Adam(net.dense_params(), lr=lr)
+    use_graph = bool(fast and DEV.type == 'cuda' and int(cfg.get('graph', 1)))
+    if use_graph:
+        opt_s = LazyAdam(net.sparse_params(), lr=torch.tensor(lrs, device=DEV)); opt_d = torch.optim.Adam(net.dense_params(), lr=torch.tensor(lr, device=DEV), capturable=True)
+    else:
+        opt_s = LazyAdam(net.sparse_params(), lr=lrs) if fast else torch.optim.SparseAdam(net.sparse_params(), lr=lrs); opt_d = torch.optim.Adam(net.dense_params(), lr=lr)
+    warm = cfg.get('warm', 200)
     if fast:
         S_t = torch.from_numpy(S).to(DEV); DS_t = torch.from_numpy(DS).to(DEV); pos_t = torch.from_numpy(pos).to(DEV)
         offs8_t = torch.from_numpy(offs8).to(DEV); o1_t = [torch.from_numpy(o).to(DEV) for o in o1]; offs2_t = torch.from_numpy(offs2).to(DEV)
@@ -204,19 +210,50 @@ def main(cfg):
     for sp_, nn_ in (('val', cfg['nval']), ('test', cfg['ntest'])):
         T, D = load_split(sp_); p, nmain = evalset(T, D, nn_, cfg.get('nlong', 40000)); ev[sp_] = dict(T=T, D=D, p=p, nmain=nmain, ds=ds_of(D, p))
     offs = np.arange(1, c + 1); curve = []; run = 0.0; cnt_ = 0; ts = time.time()
+    if use_graph:
+        pos_buf = pos_t[:B].clone(); run_t = torch.zeros((), device=DEV); cg = None; side = torch.cuda.Stream()
+        def g_step():
+            inp = make_inputs_t(S_t, pos_buf, DS_t[pos_buf], feats, offs8_t, o1_t, offs2_t); y = S_t[pos_buf]
+            loss = -net.logp(inp, y).mean(); loss.backward(); opt_s.step(); opt_d.step(); run_t.add_(loss.detach() / math.log(2)); return loss
     for st in range(steps):
-        f = min(1.0, (st + 1) / 200) * max(0.1, 1 - st / steps)
-        for g in opt_d.param_groups: g['lr'] = lr * f
-        for g in opt_s.param_groups: g['lr'] = lrs * f
-        if fast:
-            pp_t = pos_t[st * B:(st + 1) * B]; inp = make_inputs_t(S_t, pp_t, DS_t[pp_t], feats, offs8_t, o1_t, offs2_t); y = S_t[pp_t]
+        f = min(1.0, (st + 1) / warm) * max(0.1, 1 - st / steps)
+        if use_graph:
+            opt_d.param_groups[0]['lr'].fill_(lr * f); opt_s.param_groups[0]['lr'].fill_(lrs * f)
+            pos_buf.copy_(pos_t[st * B:(st + 1) * B])
+            if st < 3:                                   # 準備運転 (最初の 3 歩は 通常の経路で、 横の流れで行う。 実際の学習の歩としても数える)
+                side.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(side):
+                    opt_s.zero_grad(); opt_d.zero_grad(); g_step()
+                torch.cuda.current_stream().wait_stream(side)
+            else:
+                if cg is None:                           # 1 歩を記録する (記録に失敗したら 通常の速い経路に戻す)
+                    try:
+                        torch.cuda.synchronize(); opt_s.zero_grad(); opt_d.zero_grad(); cg = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(cg): loss_g = g_step()
+                    except Exception as e_:
+                        lg('CUDA グラフは使えませんでした (%r)。 通常の速い経路に戻します' % (e_,)); use_graph = False; cg = None; torch.cuda.synchronize(); run = float(run_t); continue
+                    with torch.no_grad():                # 自己確認: 同じ重み・同じ入力で、 通常の経路の損失と記録の再生の損失が一致するか
+                        l_e = float(-net.logp(make_inputs_t(S_t, pos_buf, DS_t[pos_buf], feats, offs8_t, o1_t, offs2_t), S_t[pos_buf]).mean())
+                    cg.replay(); l_g = float(loss_g)
+                    lg('CUDA グラフの自己確認: 通常 %.5f | 再生 %.5f (差 %.1e)' % (l_e, l_g, abs(l_e - l_g)))
+                    if abs(l_e - l_g) > 2e-3: raise RuntimeError('CUDA グラフの再生が通常の経路と合いません')
+                else:
+                    cg.replay()
+            cnt_ += 1
         else:
-            pp = pos[st * B:(st + 1) * B]; inp = make_inputs(S, pp, DS[pp], feats, offs8, o1, offs2); y = torch.from_numpy(S[pp]).to(DEV)
-        loss = -net.logp(inp, y).mean()
-        run = run + loss.detach() / math.log(2); cnt_ += 1
-        opt_s.zero_grad(); opt_d.zero_grad(); loss.backward(); opt_s.step(); opt_d.step()
+            for g in opt_d.param_groups: g['lr'] = lr * f
+            for g in opt_s.param_groups: g['lr'] = lrs * f
+            if fast:
+                pp_t = pos_t[st * B:(st + 1) * B]; inp = make_inputs_t(S_t, pp_t, DS_t[pp_t], feats, offs8_t, o1_t, offs2_t); y = S_t[pp_t]
+            else:
+                pp = pos[st * B:(st + 1) * B]; inp = make_inputs(S, pp, DS[pp], feats, offs8, o1, offs2); y = torch.from_numpy(S[pp]).to(DEV)
+            loss = -net.logp(inp, y).mean()
+            run = run + loss.detach() / math.log(2); cnt_ += 1
+            opt_s.zero_grad(); opt_d.zero_grad(); loss.backward(); opt_s.step(); opt_d.step()
         if (st + 1) % cfg.get('log_every', 500) == 0:
-            run = float(run); curve.append((st + 1, run / cnt_)); lg('歩 %d/%d: 先に予測した損失 %.4f bit/語 (直近) | %.2f 歩/秒' % (st + 1, steps, run / cnt_, cfg.get('log_every', 500) / (time.time() - ts))); run = 0.0; cnt_ = 0; ts = time.time()
+            run = float(run_t) if use_graph else float(run)
+            if use_graph: run_t.zero_()
+            curve.append((st + 1, run / cnt_)); lg('歩 %d/%d: 先に予測した損失 %.4f bit/語 (直近) | %.2f 歩/秒' % (st + 1, steps, run / cnt_, cfg.get('log_every', 500) / (time.time() - ts))); run = 0.0; cnt_ = 0; ts = time.time()
     lg('ONLINE_CTX ' + json.dumps(dict(L=L, feats=feats, steps=steps, curve=curve, last10000=float(np.mean([v for _, v in curve[-5:]])) if curve else None), ensure_ascii=False))
     # ---- 生成サンプル (網だけ。 n-gram は混ぜない) ----
     try:
