@@ -22,6 +22,7 @@ W1 = [32, 128, 512, 2048]; NS = 32; W2 = 4096; K2 = 32; MC = 512; DK = 32
 def _kq_eager(ew, vv, e0, p0, p1):
     kq = p0 * torch.where(vv, ew[:, 1:MC + 1], e0) + p1 * torch.where(vv, ew[:, 2:MC + 2], e0)
     return F.normalize(kq, dim=-1)
+BF16 = False
 KQF = _kq_eager        # main() が cfg compile=1 のとき torch.compile 版に差し替える
 
 
@@ -88,7 +89,8 @@ class Net(nn.Module):
         else:
             kq = F.normalize(s.Pk[0] * s.Ek(inp['f3_c1']) + s.Pk[1] * s.Ek(inp['f3_c2']), dim=-1)           # (B,MC,DK)
         q = F.normalize(s.Pk[0] * s.Ek(inp['ctx'][:, 0]) + s.Pk[1] * s.Ek(inp['ctx'][:, 1]), dim=-1)
-        sc = s.theta * (kq @ q[:, :, None])[:, :, 0]
+        if BF16: kq = kq.to(torch.bfloat16); q = q.to(torch.bfloat16)               # bf16=1: 大きな鍵のテンソルだけ 16 ビットで持つ (メモリ読み書きが半分)
+        sc = s.theta * (kq @ q[:, :, None])[:, :, 0].float()
         v = inp['f3_v']; any_ = v.any(1)
         sc = sc.masked_fill(~v, -1e9); a = F.softmax(sc, dim=1) * any_[:, None]
         mx = torch.minimum(sc.max(1).values.clamp_min(-1.0), s.theta.detach().abs() + 1.0)
@@ -185,7 +187,8 @@ def main(cfg):
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
     MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2)
-    global KQF
+    global KQF, BF16
+    BF16 = bool(int(cfg.get('bf16', 0)))
     if int(cfg.get('compile', 0)): KQF = torch.compile(_kq_eager)
     W = '/tmp/tok'; d = cfg.get('d', 128); c = cfg.get('c', 8); L = cfg['L']; n = cfg.get('n', 256); kk = cfg.get('kk', 4); k = cfg.get('k', 4); B = cfg.get('B', 512)
     feats = list(cfg.get('feats', [])); ntr = cfg['ntr']; lr = cfg.get('lr', 2e-3); lrs = cfg.get('lrs', 5e-3)
