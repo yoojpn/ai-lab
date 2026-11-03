@@ -24,6 +24,7 @@ def _kq_eager(ew, vv, e0, p0, p1):
     return F.normalize(kq, dim=-1)
 BF16 = False
 CV = False
+CL = 0              # ctxl=N: 下の N 層で、 その層の中間表現から 文脈の語を引き直す (Attention を重ねる)
 KQF = _kq_eager        # main() が cfg compile=1 のとき torch.compile 版に差し替える
 
 
@@ -45,6 +46,7 @@ class Net(nn.Module):
         if 2 in feats: s.G2 = nn.Parameter(torch.full((d,), 0.1))
         if 3 in feats:
             s.Ek = nn.Embedding(V, DK, sparse=SPARSE); nn.init.normal_(s.Ek.weight, 0, 0.3)
+            if CL: s.Wq = nn.ParameterList([nn.Parameter(torch.randn(d, DK) * d ** -0.5) for _ in range(CL)]); s.Gl = nn.Parameter(torch.full((CL, d), 0.02)); s.thl = nn.Parameter(torch.full((CL,), 4.0))
             if CV: s.Gc = nn.Parameter(torch.full((d,), 0.1))                      # ctxv=1: キャッシュの点で 文脈の語の意味ベクトルを 足し合わせて 入力に加える
             s.Pk = nn.Parameter(torch.ones(2, DK)); s.theta = nn.Parameter(torch.tensor(8.0)); s.ga = nn.Parameter(torch.tensor(1.0)); s.gb = nn.Parameter(torch.tensor(-2.0))
 
@@ -75,6 +77,11 @@ class Net(nn.Module):
             x = x + s.G2[None] * s2
         n, kk, k, h = s.n, s.kk, s.k, s.d // 2
         for l in range(s.L):
+            if l < CL and 3 in s.feats:                                              # 層ごとの Attention: 今の中間表現で 鍵 (直前2語から作った kq) を引き直し 文脈の語を足す
+                kq = s._kq; qh = F.normalize(s.rms(x) @ s.Wq[l], dim=-1).to(kq.dtype)
+                sc_ = s.thl[l] * (kq @ qh[:, :, None])[:, :, 0].float(); v_ = inp['f3_v']
+                al = F.softmax(sc_.masked_fill(~v_, -1e9), dim=1) * v_.any(1)[:, None]
+                x = x + s.Gl[l][None] * F.embedding_bag(inp['f3_val'], s.E.weight, per_sample_weights=al, mode='sum', sparse=s.E.sparse)
             q = s.rms(x); q1, q2 = q[:, :h], q[:, h:]
             s1 = q1 @ s.K1[l].t() / math.sqrt(h); s2_ = q2 @ s.K2[l].t() / math.sqrt(h)
             v1, i1 = s1.topk(kk, dim=1); v2, i2 = s2_.topk(kk, dim=1)
@@ -93,6 +100,7 @@ class Net(nn.Module):
             kq = F.normalize(s.Pk[0] * s.Ek(inp['f3_c1']) + s.Pk[1] * s.Ek(inp['f3_c2']), dim=-1)           # (B,MC,DK)
         q = F.normalize(s.Pk[0] * s.Ek(inp['ctx'][:, 0]) + s.Pk[1] * s.Ek(inp['ctx'][:, 1]), dim=-1)
         if BF16: kq = kq.to(torch.bfloat16); q = q.to(torch.bfloat16)               # bf16=1: 大きな鍵のテンソルだけ 16 ビットで持つ (メモリ読み書きが半分)
+        s._kq = kq
         sc = s.theta * (kq @ q[:, :, None])[:, :, 0].float()
         v = inp['f3_v']; any_ = v.any(1)
         sc = sc.masked_fill(~v, -1e9); a = F.softmax(sc, dim=1) * any_[:, None]
@@ -200,8 +208,8 @@ def main(cfg):
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
     MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2)
-    global KQF, BF16, CV
-    CV = bool(int(cfg.get('ctxv', 0)))
+    global KQF, BF16, CV, CL
+    CV = bool(int(cfg.get('ctxv', 0))); CL = int(cfg.get('ctxl', 0))
     BF16 = bool(int(cfg.get('bf16', 0)))
     if int(cfg.get('compile', 0)): KQF = torch.compile(_kq_eager)
     W = '/tmp/tok'; d = cfg.get('d', 128); c = cfg.get('c', 8); L = cfg['L']; n = cfg.get('n', 256); kk = cfg.get('kk', 4); k = cfg.get('k', 4); B = cfg.get('B', 512)
