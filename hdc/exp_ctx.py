@@ -360,6 +360,52 @@ def main(cfg):
     lg('長い文脈(文書内256語以降, n=%d): 単独 %.4f | n-gram較正 %.4f -> 混合 %.4f (上乗せ %.4f)' % (res['long256']['n'], res['long256']['nn'], res['long256']['base'], res['long256']['final'], res['long256']['gain']))
     for kx, vx in per.items(): lg('  文書内位置 %s (n=%d): 単独 %.4f | 較正 %.4f -> 混合 %.4f (上乗せ %.4f)' % (kx, vx['n'], vx['nn'], vx['base'], vx['final'], vx['gain']))
     lg('RESULT_CTX ' + json.dumps(dict(cfg=cfg, res=res), ensure_ascii=False))
+    if cfg.get('dlg'):                                   # ---- 会話データで 調整して、 質問に答えさせてみる (prep_dialog.py で 作ったデータを使う) ----
+        dd = cfg.get('dlg_dir', '/tmp/dlg_out')
+        Tq = np.fromfile(dd + '/dlg_train.bin', dtype=np.uint16).astype(np.int64); Dq = np.load(dd + '/dlg_train_docs.npy'); test_items = json.load(open(dd + '/dlg_test.json'))
+        S2 = np.concatenate([np.zeros(c, np.int64), Tq]); dsq = Dq[np.maximum(np.searchsorted(Dq, np.arange(len(Tq)), 'right') - 1, 0)]
+        DS2 = np.concatenate([np.arange(c), c + dsq]); pos2 = np.arange(c, len(S2)); pos2 = pos2[S2[pos2] != 0]
+        lg('DLG 調整データ: %d 語, %d 例, 検証 %d 問' % (len(Tq), len(Dq), len(test_items)))
+        def ans_loss():
+            net.eval(); tot = {}
+            with torch.no_grad():
+                for it in test_items:
+                    p_ids = tk.encode(it['prompt']).ids; a_ids = tk.encode(it['ref'] + '\n\n').ids[:200]
+                    T_ = np.array([0] * c + p_ids + a_ids, dtype=np.int64); ps = np.arange(c + len(p_ids), len(T_))
+                    inp = make_inputs(T_, ps, np.full(len(ps), c), feats, offs8, o1, offs2); y = torch.from_numpy(T_[ps]).to(DEV)
+                    v_ = float((-net.logp(inp, y) / math.log(2)).sum()); s_ = tot.setdefault(it['src'], [0.0, 0]); s_[0] += v_; s_[1] += len(ps)
+            net.train(); return {k_: round(v_[0] / v_[1], 4) for k_, v_ in tot.items()}
+        def gen(prompt, nmax=120, temp=0.7, topk_=40):
+            T_ = np.array([0] * c + tk.encode(prompt).ids, dtype=np.int64); n0 = len(T_); net.eval()
+            with torch.no_grad():
+                for i_ in range(nmax):
+                    inp = make_inputs(T_, np.array([len(T_)]), np.array([c]), feats, offs8, o1, offs2); pr = net.dist(inp)[0] ** (1 / temp); pr[0] = 0; tv, ti = pr.topk(topk_)
+                    pr = torch.zeros_like(pr).scatter_(0, ti, tv); pr = pr / pr.sum(); T_ = np.r_[T_, int(torch.multinomial(pr, 1))]
+                    if i_ % 8 == 7 and '###' in tk.decode(T_[n0:].tolist()): break
+            net.train(); return tk.decode(T_[n0:].tolist()).split('###')[0].strip().replace('\n', ' / ')
+        pick = {}
+        for it in test_items:
+            if len(pick.setdefault(it['src'], [])) < cfg.get('dlg_ngen', 3): pick[it['src']].append(it)
+        show = lambda tag: [lg('GEN_CHAT[%s][%s] 質問: %s || 正解: %s || 網: %s' % (tag, k_, it['prompt'].replace('### 質問\n', '').replace('\n### 回答\n', '')[:150].replace('\n', ' '), it['ref'][:120].replace('\n', ' '), gen(it['prompt']))) for k_, v_ in pick.items() for it in v_]
+        l0 = ans_loss(); lg('DLG 検証の答えの損失 (調整前, bit/語): %s' % json.dumps(l0, ensure_ascii=False)); show('調整前')
+        B2 = cfg.get('dlg_B', 256); ep = cfg.get('dlg_epochs', 2); flr = cfg.get('dlg_lr', 0.4); spe = len(pos2) // B2; steps2 = min(ep * spe, cfg.get('dlg_max', 10 ** 9))
+        order = np.concatenate([rng.permutation(len(pos2)) for _ in range(ep)]); pos_all = pos2[order]
+        S2_t = torch.from_numpy(S2).to(DEV); DS2_t = torch.from_numpy(DS2).to(DEV); pos_all_t = torch.from_numpy(pos_all).to(DEV)
+        ts2 = time.time(); run2 = 0.0; cn2 = 0
+        for st in range(steps2):
+            f = min(1.0, (st + 1) / 100) * max(0.05, 1 - st / steps2) * flr
+            for g in opt_d.param_groups: g['lr'].fill_(lr * f) if torch.is_tensor(g['lr']) else g.__setitem__('lr', lr * f)
+            for g in opt_s.param_groups: g['lr'].fill_(lrs * f) if torch.is_tensor(g['lr']) else g.__setitem__('lr', lrs * f)
+            if fast:
+                pp_t = pos_all_t[st * B2:(st + 1) * B2]; inp = make_inputs_t(S2_t, pp_t, DS2_t[pp_t], feats, offs8_t, o1_t, offs2_t); y = S2_t[pp_t]
+            else:
+                pp = pos_all[st * B2:(st + 1) * B2]; inp = make_inputs(S2, pp, DS2[pp], feats, offs8, o1, offs2); y = torch.from_numpy(S2[pp]).to(DEV)
+            loss = -net.logp(inp, y).mean(); run2 += float(loss) / math.log(2); cn2 += 1
+            opt_s.zero_grad(); opt_d.zero_grad(); loss.backward(); opt_s.step(); opt_d.step()
+            if (st + 1) % cfg.get('dlg_log', 1000) == 0:
+                lg('DLG 歩 %d/%d: 損失 %.4f bit/語 | %.1f 歩/秒' % (st + 1, steps2, run2 / cn2, cfg.get('dlg_log', 1000) / (time.time() - ts2))); run2 = 0.0; cn2 = 0; ts2 = time.time()
+        l1 = ans_loss(); lg('DLG 検証の答えの損失 (調整後, bit/語): %s' % json.dumps(l1, ensure_ascii=False)); show('調整後')
+        lg('RESULT_DLG ' + json.dumps(dict(before=l0, after=l1), ensure_ascii=False))
 
 
 if __name__ == '__main__':
