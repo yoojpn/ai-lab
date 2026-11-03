@@ -53,14 +53,14 @@ class Net(nn.Module):
     def hidden(s, inp):
         x = (s.E(inp['ctx']) * s.P[None]).sum(1)
         if 1 in s.feats:
-            e = s.E(inp['f1_ids']); m = inp['f1_m'][..., None]                       # (B,4,NS,d), (B,4,NS,1)
-            mean = (e * m).sum(2) / m.sum(2).clamp_min(1.0)                         # (B,4,d)
+            ids1 = inp['f1_ids']; m1 = inp['f1_m']; w1 = m1 / m1.sum(2, keepdim=True).clamp_min(1.0)   # 重みつきの平均を 1 命令で (embedding_bag)
+            mean = F.embedding_bag(ids1.reshape(-1, ids1.shape[2]), s.E.weight, per_sample_weights=w1.reshape(-1, ids1.shape[2]), mode='sum', sparse=s.E.sparse).view(ids1.shape[0], ids1.shape[1], -1)   # (B,4,d)
             x = x + (mean * s.G1[None]).sum(1)
         if 2 in s.feats:
             r = s.rar[inp['f2_ids']].masked_fill(~inp['f2_v'], -1.0)                # (B,4088)
             tv, ti = r.topk(K2, dim=1); w = tv.clamp_min(0.0)                       # 稀さ (無効は 0)
             ids = inp['f2_ids'].gather(1, ti)
-            s2 = (s.E(ids) * w[..., None]).sum(1) / (w.sum(1, keepdim=True) + 1e-6)
+            s2 = F.embedding_bag(ids, s.E.weight, per_sample_weights=w / (w.sum(1, keepdim=True) + 1e-6), mode='sum', sparse=s.E.sparse)
             x = x + s.G2[None] * s2
         n, kk, k, h = s.n, s.kk, s.k, s.d // 2
         for l in range(s.L):
@@ -75,7 +75,11 @@ class Net(nn.Module):
         return s.rms(x)
 
     def cache(s, inp):
-        kq = s.Pk[0] * s.Ek(inp['f3_c1']) + s.Pk[1] * s.Ek(inp['f3_c2'])           # (B,MC,DK)
+        if 'f3_win' in inp:                                                         # 窓の語を 1 回だけ引いて、 ずらして使う (c1, c2 を別々に引くのと同じ値)
+            ew = s.Ek(inp['f3_win']); vv = inp['f3_v'][..., None]; e0 = s.Ek.weight[0]
+            kq = s.Pk[0] * torch.where(vv, ew[:, 1:MC + 1], e0) + s.Pk[1] * torch.where(vv, ew[:, 2:MC + 2], e0)
+        else:
+            kq = s.Pk[0] * s.Ek(inp['f3_c1']) + s.Pk[1] * s.Ek(inp['f3_c2'])           # (B,MC,DK)
         kq = F.normalize(kq, dim=-1)
         q = F.normalize(s.Pk[0] * s.Ek(inp['ctx'][:, 0]) + s.Pk[1] * s.Ek(inp['ctx'][:, 1]), dim=-1)
         sc = s.theta * (kq @ q[:, :, None])[:, :, 0]
@@ -143,6 +147,7 @@ def make_inputs_t(T, pos, ds, feats, offs8, o1, offs2):
     if 3 in feats:
         j = pos[:, None] - torch.arange(1, MC + 1, device=T.device)[None]; v = (j - 2) >= ds[:, None]
         inp['f3_val'] = T[j.clamp_min(0)] * v; inp['f3_c1'] = T[(j - 1).clamp_min(0)] * v; inp['f3_c2'] = T[(j - 2).clamp_min(0)] * v; inp['f3_v'] = v
+        inp['f3_win'] = T[(pos[:, None] - torch.arange(1, MC + 3, device=T.device)[None]).clamp_min(0)]
     return inp
 
 
@@ -164,6 +169,7 @@ def make_inputs(T, pos, ds, feats, offs8, o1, offs2):
         j = pos[:, None] - np.arange(1, MC + 1)[None]; v = (j - 2) >= ds[:, None]
         inp['f3_val'] = torch.from_numpy(T[np.maximum(j, 0)] * v); inp['f3_c1'] = torch.from_numpy(T[np.maximum(j - 1, 0)] * v)
         inp['f3_c2'] = torch.from_numpy(T[np.maximum(j - 2, 0)] * v); inp['f3_v'] = torch.from_numpy(v)
+        inp['f3_win'] = torch.from_numpy(T[np.maximum(pos[:, None] - np.arange(1, MC + 3)[None], 0)])
     return {k_: v_.to(DEV) for k_, v_ in inp.items()}
 
 
