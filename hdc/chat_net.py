@@ -7,6 +7,15 @@ import exp_ctx as X
 from tokenizers import Tokenizer
 
 
+def tok_path():
+    """重みを学習したときと同じ tokenizer (HF の tok/tok.json)。 手元の別の tok.json では 語の番号が合わず 出力が壊れる"""
+    p = os.environ.get('TOK_JSON', '/tmp/tokhf/tok/tok.json')
+    if not os.path.exists(p):
+        from huggingface_hub import hf_hub_download
+        p = hf_hub_download('Youichi1/ai-lab-data', 'tok/tok.json', repo_type='dataset', token=os.environ.get('HF_TOKEN'), local_dir='/tmp/tokhf')
+    return p
+
+
 def load(path):
     ck = torch.load(path, map_location='cpu'); cfg = ck['cfg']; st = ck['state']
     X.DEV = torch.device('cpu'); X.SPARSE = False; X.CV = bool(int(cfg.get('ctxv', 0))); X.CL = int(cfg.get('ctxl', 0)); X.BF16 = bool(int(cfg.get('bf16', 0)))
@@ -27,6 +36,6 @@ def answer(net, cfg, tk, q, temp=0.7, topk=40, nmax=150):
 
 
 if __name__ == '__main__':
-    net, cfg = load(sys.argv[1]); tk = Tokenizer.from_file('/tmp/tok/tok.json')
+    net, cfg = load(sys.argv[1]); tk = Tokenizer.from_file(tok_path())
     for q in sys.argv[2:]:
         print('Q:', q); print('A:', answer(net, cfg, tk, q, float(os.environ.get('TEMP', 0.7)), int(os.environ.get('TOPK', 40)), int(os.environ.get('NMAX', 150)))); print()
