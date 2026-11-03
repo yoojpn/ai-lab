@@ -360,6 +360,18 @@ def main(cfg):
     lg('長い文脈(文書内256語以降, n=%d): 単独 %.4f | n-gram較正 %.4f -> 混合 %.4f (上乗せ %.4f)' % (res['long256']['n'], res['long256']['nn'], res['long256']['base'], res['long256']['final'], res['long256']['gain']))
     for kx, vx in per.items(): lg('  文書内位置 %s (n=%d): 単独 %.4f | 較正 %.4f -> 混合 %.4f (上乗せ %.4f)' % (kx, vx['n'], vx['nn'], vx['base'], vx['final'], vx['gain']))
     lg('RESULT_CTX ' + json.dumps(dict(cfg=cfg, res=res), ensure_ascii=False))
+    def save_up(tag):                                    # 重みを保存して HF の非公開データセットへ置く (失敗しても 学習は続ける)
+        try:
+            p_ = '/content/%s.pt' % tag if os.path.isdir('/content') else '/tmp/%s.pt' % tag
+            torch.save(dict(cfg=cfg, state={k_: v_.detach().cpu() for k_, v_ in net.state_dict().items()}), p_); lg('保存: %s (%.0f MB)' % (p_, os.path.getsize(p_) / 1e6))
+            tok_ = os.environ.get('HF_TOKEN_UP')
+            if tok_:
+                from huggingface_hub import HfApi
+                HfApi().upload_file(path_or_fileobj=p_, path_in_repo='models/%s.pt' % tag, repo_id=cfg.get('save_repo', 'Youichi1/ai-lab-data'), repo_type='dataset', token=tok_); lg('HFへ保存: models/%s.pt' % tag)
+            else: lg('HF_TOKEN_UP がないので HF への保存は省略')
+        except Exception as e_:
+            lg('重みの保存に失敗: %r' % (e_,))
+    if cfg.get('save'): save_up(cfg['save'] + '_base')
     if cfg.get('dlg'):                                   # ---- 会話データで 調整して、 質問に答えさせてみる (prep_dialog.py で 作ったデータを使う) ----
         dd = cfg.get('dlg_dir', '/tmp/dlg_out')
         Tq = np.fromfile(dd + '/dlg_train.bin', dtype=np.uint16).astype(np.int64); Dq = np.load(dd + '/dlg_train_docs.npy'); test_items = json.load(open(dd + '/dlg_test.json'))
@@ -406,6 +418,7 @@ def main(cfg):
                 lg('DLG 歩 %d/%d: 損失 %.4f bit/語 | %.1f 歩/秒' % (st + 1, steps2, run2 / cn2, cfg.get('dlg_log', 1000) / (time.time() - ts2))); run2 = 0.0; cn2 = 0; ts2 = time.time()
         l1 = ans_loss(); lg('DLG 検証の答えの損失 (調整後, bit/語): %s' % json.dumps(l1, ensure_ascii=False)); show('調整後')
         lg('RESULT_DLG ' + json.dumps(dict(before=l0, after=l1), ensure_ascii=False))
+        if cfg.get('save'): save_up(cfg['save'] + '_dlg')
 
 
 if __name__ == '__main__':
