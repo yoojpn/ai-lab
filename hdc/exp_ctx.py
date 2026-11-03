@@ -28,6 +28,7 @@ class Net(nn.Module):
         s.K2 = nn.ParameterList([nn.Parameter(torch.randn(n, d // 2) * 0.5) for _ in range(L)])
         s.Val = nn.ModuleList([nn.Embedding(n * n, d, sparse=SPARSE) for _ in range(L)])
         for v in s.Val: nn.init.normal_(v.weight, 0, 0.02)
+        s._rows = [None] * L
         s.tau = nn.Parameter(torch.ones(max(L, 1)))
         s.U = nn.Parameter(torch.randn(V, d) * 0.05)
         s.register_buffer('rar', torch.tensor(rar, dtype=torch.float32))
@@ -69,7 +70,7 @@ class Net(nn.Module):
             comb = (v1[:, :, None] + v2[:, None, :]).flatten(1)
             sc, ix = comb.topk(k, dim=1)
             a = F.softmax(sc / s.tau[l].abs().clamp_min(0.05), dim=1)
-            ia = i1.gather(1, ix // kk); ib = i2.gather(1, ix % kk); rows = ia * n + ib
+            ia = i1.gather(1, ix // kk); ib = i2.gather(1, ix % kk); rows = ia * n + ib; s._rows[l] = rows.flatten()
             x = x + (a[:, :, None] * s.Val[l](rows)).sum(1)
         return s.rms(x)
 
@@ -99,7 +100,8 @@ class Net(nn.Module):
 
 class LazyAdam:
     """SparseAdam と同じ計算 (勾配が 0 でない行だけ更新) を 密な勾配で GPU 上で行う。"""
-    def __init__(s, params, lr, betas=(0.9, 0.999), eps=1e-8):
+    def __init__(s, params, lr, betas=(0.9, 0.999), eps=1e-8, rowsrc=None):
+        s.rowsrc = rowsrc or {}      # {id(重み): その歩に使った行の番号を返す関数}  (あれば その行だけ更新: 同じ番号が重なっても同じ値を書くだけ)
         s.param_groups = [{'params': list(params), 'lr': lr}]; s.b1, s.b2 = betas; s.eps = eps; s.st = {}
         s.t = torch.zeros((), device=s.param_groups[0]['params'][0].device)   # 歩数 (GPU の上のテンソル: CUDA グラフに記録できる)
 
@@ -115,7 +117,13 @@ class LazyAdam:
                 G = p.grad
                 if G is None: continue
                 if id(p) not in s.st: s.st[id(p)] = (torch.zeros_like(p), torch.zeros_like(p))
-                m, v = s.st[id(p)]; mask = (G != 0).any(1, keepdim=True)
+                m, v = s.st[id(p)]
+                if id(p) in s.rowsrc:
+                    idx = s.rowsrc[id(p)](); Gs = G[idx]; mn = s.b1 * m[idx] + (1 - s.b1) * Gs; vn = s.b2 * v[idx] + (1 - s.b2) * Gs * Gs
+                    upd = (g['lr'] * bc2.sqrt() / bc1) * mn / (vn.sqrt() + s.eps)
+                    m[idx] = mn; v[idx] = vn; p[idx] = p[idx] - upd
+                    continue
+                mask = (G != 0).any(1, keepdim=True)
                 m.copy_(torch.where(mask, s.b1 * m + (1 - s.b1) * G, m)); v.copy_(torch.where(mask, s.b2 * v + (1 - s.b2) * G * G, v))
                 upd = (g['lr'] * bc2.sqrt() / bc1) * m / (v.sqrt() + s.eps)
                 p.sub_(torch.where(mask, upd, torch.zeros_like(upd)))
@@ -182,10 +190,11 @@ def main(cfg):
     net = Net(d, c, L, n, kk, k, feats, rar).to(DEV); npar = sum(p.numel() for p in net.parameters())
     lg('L=%d feats=%s B=%d 学習語 %d 歩数 %d パラメータ %.1fM 窓: 部品2=%d 部品3=%d' % (L, feats, B, len(pos), steps, npar / 1e6, W2, MC))
     use_graph = bool(fast and DEV.type == 'cuda' and int(cfg.get('graph', 1)))
+    rowsrc = {id(v_.weight): (lambda l_=l_: net._rows[l_]) for l_, v_ in enumerate(net.Val)} if int(cfg.get('rowwise', 1)) else {}
     if use_graph:
-        opt_s = LazyAdam(net.sparse_params(), lr=torch.tensor(lrs, device=DEV)); opt_d = torch.optim.Adam(net.dense_params(), lr=torch.tensor(lr, device=DEV), capturable=True)
+        opt_s = LazyAdam(net.sparse_params(), lr=torch.tensor(lrs, device=DEV), rowsrc=rowsrc); opt_d = torch.optim.Adam(net.dense_params(), lr=torch.tensor(lr, device=DEV), capturable=True)
     else:
-        opt_s = LazyAdam(net.sparse_params(), lr=lrs) if fast else torch.optim.SparseAdam(net.sparse_params(), lr=lrs); opt_d = torch.optim.Adam(net.dense_params(), lr=lr)
+        opt_s = LazyAdam(net.sparse_params(), lr=lrs, rowsrc=rowsrc) if fast else torch.optim.SparseAdam(net.sparse_params(), lr=lrs); opt_d = torch.optim.Adam(net.dense_params(), lr=lr)
     warm = cfg.get('warm', 200)
     if fast:
         S_t = torch.from_numpy(S).to(DEV); DS_t = torch.from_numpy(DS).to(DEV); pos_t = torch.from_numpy(pos).to(DEV)
