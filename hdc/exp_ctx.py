@@ -18,6 +18,13 @@ SPARSE = True    # GPU では False (密な勾配 + LazyAdam)
 W1 = [32, 128, 512, 2048]; NS = 32; W2 = 4096; K2 = 32; MC = 512; DK = 32
 
 
+
+def _kq_eager(ew, vv, e0, p0, p1):
+    kq = p0 * torch.where(vv, ew[:, 1:MC + 1], e0) + p1 * torch.where(vv, ew[:, 2:MC + 2], e0)
+    return F.normalize(kq, dim=-1)
+KQF = _kq_eager        # main() が cfg compile=1 のとき torch.compile 版に差し替える
+
+
 class Net(nn.Module):
     def __init__(s, d, c, L, n, kk, k, feats, rar):
         super().__init__()
@@ -77,10 +84,9 @@ class Net(nn.Module):
     def cache(s, inp):
         if 'f3_win' in inp:                                                         # 窓の語を 1 回だけ引いて、 ずらして使う (c1, c2 を別々に引くのと同じ値)
             ew = s.Ek(inp['f3_win']); vv = inp['f3_v'][..., None]; e0 = s.Ek.weight[0]
-            kq = s.Pk[0] * torch.where(vv, ew[:, 1:MC + 1], e0) + s.Pk[1] * torch.where(vv, ew[:, 2:MC + 2], e0)
+            kq = KQF(ew, vv, e0, s.Pk[0], s.Pk[1])                                  # 掛け算・選択・足し算・正規化を 1 つの計算にまとめる (compile=1 のとき)
         else:
-            kq = s.Pk[0] * s.Ek(inp['f3_c1']) + s.Pk[1] * s.Ek(inp['f3_c2'])           # (B,MC,DK)
-        kq = F.normalize(kq, dim=-1)
+            kq = F.normalize(s.Pk[0] * s.Ek(inp['f3_c1']) + s.Pk[1] * s.Ek(inp['f3_c2']), dim=-1)           # (B,MC,DK)
         q = F.normalize(s.Pk[0] * s.Ek(inp['ctx'][:, 0]) + s.Pk[1] * s.Ek(inp['ctx'][:, 1]), dim=-1)
         sc = s.theta * (kq @ q[:, :, None])[:, :, 0]
         v = inp['f3_v']; any_ = v.any(1)
@@ -179,6 +185,8 @@ def main(cfg):
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
     MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2)
+    global KQF
+    if int(cfg.get('compile', 0)): KQF = torch.compile(_kq_eager)
     W = '/tmp/tok'; d = cfg.get('d', 128); c = cfg.get('c', 8); L = cfg['L']; n = cfg.get('n', 256); kk = cfg.get('kk', 4); k = cfg.get('k', 4); B = cfg.get('B', 512)
     feats = list(cfg.get('feats', [])); ntr = cfg['ntr']; lr = cfg.get('lr', 2e-3); lrs = cfg.get('lrs', 5e-3)
     offs8 = np.arange(1, c + 1); o1 = [1 + (np.arange(NS) * w) // NS for w in W1]; offs2 = np.arange(c + 1, W2 + 1)
