@@ -23,6 +23,7 @@ def _kq_eager(ew, vv, e0, p0, p1):
     kq = p0 * torch.where(vv, ew[:, 1:MC + 1], e0) + p1 * torch.where(vv, ew[:, 2:MC + 2], e0)
     return F.normalize(kq, dim=-1)
 BF16 = False
+CV = False
 KQF = _kq_eager        # main() が cfg compile=1 のとき torch.compile 版に差し替える
 
 
@@ -44,6 +45,7 @@ class Net(nn.Module):
         if 2 in feats: s.G2 = nn.Parameter(torch.full((d,), 0.1))
         if 3 in feats:
             s.Ek = nn.Embedding(V, DK, sparse=SPARSE); nn.init.normal_(s.Ek.weight, 0, 0.3)
+            if CV: s.Gc = nn.Parameter(torch.full((d,), 0.1))                      # ctxv=1: キャッシュの点で 文脈の語の意味ベクトルを 足し合わせて 入力に加える
             s.Pk = nn.Parameter(torch.ones(2, DK)); s.theta = nn.Parameter(torch.tensor(8.0)); s.ga = nn.Parameter(torch.tensor(1.0)); s.gb = nn.Parameter(torch.tensor(-2.0))
 
     def sparse_params(s):
@@ -58,8 +60,9 @@ class Net(nn.Module):
     def rms(x):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6)
 
-    def hidden(s, inp):
+    def hidden(s, inp, cv=None):
         x = (s.E(inp['ctx']) * s.P[None]).sum(1)
+        if cv is not None: x = x + s.Gc[None] * cv
         if 1 in s.feats:
             ids1 = inp['f1_ids']; m1 = inp['f1_m']; w1 = m1 / m1.sum(2, keepdim=True).clamp_min(1.0)   # 重みつきの平均を 1 命令で (embedding_bag)
             mean = F.embedding_bag(ids1.reshape(-1, ids1.shape[2]), s.E.weight, per_sample_weights=w1.reshape(-1, ids1.shape[2]), mode='sum', sparse=s.E.sparse).view(ids1.shape[0], ids1.shape[1], -1)   # (B,4,d)
@@ -97,16 +100,26 @@ class Net(nn.Module):
         g = torch.sigmoid(s.ga * mx + s.gb) * any_
         return a, g
 
+    def ctxv(s, inp, a):
+        if not CV: return None
+        return F.embedding_bag(inp['f3_val'], s.E.weight, per_sample_weights=a, mode='sum', sparse=s.E.sparse)    # (B,d): 点 a で 重みづけした 文脈の語の意味ベクトル
+
     def logp(s, inp, y):
-        lp = F.log_softmax(F.linear(s.hidden(inp), s.U), dim=1).gather(1, y[:, None])[:, 0]
+        if 3 in s.feats:
+            a, g = s.cache(inp); cv = s.ctxv(inp, a)
+        else: cv = None
+        lp = F.log_softmax(F.linear(s.hidden(inp, cv), s.U), dim=1).gather(1, y[:, None])[:, 0]
         if 3 not in s.feats: return lp
-        a, g = s.cache(inp); pc = (a * (inp['f3_val'] == y[:, None]).float()).sum(1)
+        pc = (a * (inp['f3_val'] == y[:, None]).float()).sum(1)
         return torch.log((1 - g) * lp.exp() + g * pc + 1e-12)
 
     def dist(s, inp):
-        pm = F.softmax(F.linear(s.hidden(inp), s.U), dim=1)
+        if 3 in s.feats:
+            a, g = s.cache(inp); cv = s.ctxv(inp, a)
+        else: cv = None
+        pm = F.softmax(F.linear(s.hidden(inp, cv), s.U), dim=1)
         if 3 not in s.feats: return pm
-        a, g = s.cache(inp); pcd = torch.zeros_like(pm).scatter_add_(1, inp['f3_val'], a)
+        pcd = torch.zeros_like(pm).scatter_add_(1, inp['f3_val'], a)
         return (1 - g)[:, None] * pm + g[:, None] * pcd
 
 
@@ -187,7 +200,8 @@ def main(cfg):
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
     MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2)
-    global KQF, BF16
+    global KQF, BF16, CV
+    CV = bool(int(cfg.get('ctxv', 0)))
     BF16 = bool(int(cfg.get('bf16', 0)))
     if int(cfg.get('compile', 0)): KQF = torch.compile(_kq_eager)
     W = '/tmp/tok'; d = cfg.get('d', 128); c = cfg.get('c', 8); L = cfg['L']; n = cfg.get('n', 256); kk = cfg.get('kk', 4); k = cfg.get('k', 4); B = cfg.get('B', 512)
