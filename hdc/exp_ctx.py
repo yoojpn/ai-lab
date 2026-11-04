@@ -263,6 +263,30 @@ def main(cfg):
         def g_step():
             inp = make_inputs_t(S_t, pos_buf, DS_t[pos_buf], feats, offs8_t, o1_t, offs2_t); y = S_t[pos_buf]
             loss = -net.logp(inp, y).mean(); loss.backward(); opt_s.step(); opt_d.step(); run_t.add_(loss.detach() / math.log(2)); return loss
+    if cfg.get('prof') and fast and DEV.type == 'cuda':       # 時間の内訳を測る (学習はしない): 入力の準備 / 順方向 / 逆方向 / 疎な更新 / 密な更新 を CUDA イベントで、 さらに 重い計算の上位を torch.profiler で
+        ev_ = lambda: torch.cuda.Event(enable_timing=True)
+        def one_step(st_, tm):
+            pp_t = pos_t[st_ * B:(st_ + 1) * B]; e = [ev_() for _ in range(6)]; e[0].record()
+            inp = make_inputs_t(S_t, pp_t, DS_t[pp_t], feats, offs8_t, o1_t, offs2_t); y = S_t[pp_t]; e[1].record()
+            loss = -net.logp(inp, y).mean(); e[2].record()
+            opt_s.zero_grad(); opt_d.zero_grad(); loss.backward(); e[3].record()
+            opt_s.step(); e[4].record(); opt_d.step(); e[5].record()
+            if tm is not None: tm.append(e)
+        for st_ in range(10): one_step(st_, None)
+        torch.cuda.synchronize(); tm = []
+        for st_ in range(10, 40): one_step(st_, tm)
+        torch.cuda.synchronize()
+        names = ['入力の準備', '順方向', '逆方向', '疎な更新(E, Val, Ek)', '密な更新']
+        tot_ = [np.mean([e[i].elapsed_time(e[i + 1]) for e in tm]) for i in range(5)]
+        lg('PROF_PHASE ' + json.dumps({n_: round(float(t_), 3) for n_, t_ in zip(names, tot_)}, ensure_ascii=False) + ' 合計 %.3f ミリ秒/歩 (= %.1f 歩/秒, 通常の経路)' % (sum(tot_), 1000 / sum(tot_)))
+        from torch.profiler import profile, ProfilerActivity
+        with profile(activities=[ProfilerActivity.CUDA]) as pr_:
+            for st_ in range(40, 50): one_step(st_, None)
+            torch.cuda.synchronize()
+        sd_ = lambda r: getattr(r, 'self_device_time_total', None) or getattr(r, 'self_cuda_time_total', 0.0)
+        rows_ = sorted(pr_.key_averages(), key=lambda r: -sd_(r))[:14]; tt_ = max(sum(sd_(r) for r in pr_.key_averages()), 1.0)
+        for r in rows_: lg('PROF_KERNEL %5.1f%% %8.2f ミリ秒/歩 x%d %s' % (100 * sd_(r) / tt_, sd_(r) / 1000 / 10, r.count // 10, r.key[:90]))
+        lg('PROF_TOTAL GPU の実計算 %.2f ミリ秒/歩' % (tt_ / 1000 / 10)); return
     for st in range(steps):
         f = min(1.0, (st + 1) / warm) * max(0.1, 1 - st / steps)
         if use_graph:
