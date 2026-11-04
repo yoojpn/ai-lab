@@ -287,9 +287,10 @@ def main(cfg):
     def load_split(sp_):
         T = np.fromfile('%s/%s.bin' % (W, sp_), dtype=np.uint16).astype(np.int64); D = np.load('%s/%s_docs.npy' % (W, sp_)); return T, D
     def ds_of(D, p): return D[np.maximum(np.searchsorted(D, p, 'right') - 1, 0)]
+    rng_ev = np.random.default_rng(int(cfg.get('eval_seed', 777)))      # 評価の位置は 学習の乱数と切り離して固定 (構成を変えても 同じ位置で測る)
     def evalset(T, D, nn_, nlong):
-        p = rng.integers(16 + c, len(T), int(nn_ * 1.02)); p = p[T[p] != 0][:nn_]
-        q = rng.integers(16 + c, len(T), 4000000); q = q[(T[q] != 0) & ((q - ds_of(D, q)) >= 256)][:nlong]; return np.r_[p, q], len(p)
+        p = rng_ev.integers(16 + c, len(T), int(nn_ * 1.02)); p = p[T[p] != 0][:nn_]
+        q = rng_ev.integers(16 + c, len(T), 4000000); q = q[(T[q] != 0) & ((q - ds_of(D, q)) >= 256)][:nlong]; return np.r_[p, q], len(p)
     ev = {}
     for sp_, nn_ in (('val', cfg['nval']), ('test', cfg['ntest'])):
         T, D = load_split(sp_); p, nmain = evalset(T, D, nn_, cfg.get('nlong', 40000)); ev[sp_] = dict(T=T, D=D, p=p, nmain=nmain, ds=ds_of(D, p))
