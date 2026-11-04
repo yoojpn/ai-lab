@@ -112,6 +112,28 @@ class Net(nn.Module):
         if not CV: return None
         return F.embedding_bag(inp['f3_val'], s.E.weight, per_sample_weights=a, mode='sum', sparse=s.E.sparse)    # (B,d): 点 a で 重みづけした 文脈の語の意味ベクトル
 
+    def band(s, X, ds_loc, M):
+        """連続した M 個の位置の 文脈キャッシュ (鍵・点・値の足し合わせ) を 列ごとに 1 回で作る (位置ごとに 窓を引き直さない)。
+        X: (nb, Ls) 長さ Ls = M+MC+2 の語の列 (位置 MC+2+m が m 番目の予測する位置)。 ds_loc: (nb, M) 各位置の文書の開始 (X の中の番号)。 ctxl には未対応"""
+        nb, Ls = X.shape; dev = X.device; Ek = s.Ek(X)
+        KQ = F.normalize(s.Pk[0] * Ek[:, 1:-1] + s.Pk[1] * Ek[:, :-2], dim=-1)                    # (nb,Ls-2,DK): 鍵 (直前 2 語から)
+        Kw = KQ.unfold(1, MC, 1)[:, :M]                                                          # (nb,M,DK,MC): 位置 m の窓の鍵 (引き直さず ずらして使う)
+        pi = MC + 2 + torch.arange(M, device=dev)
+        q = F.normalize(s.Pk[0] * Ek[:, pi - 1] + s.Pk[1] * Ek[:, pi - 2], dim=-1)               # (nb,M,DK)
+        sc = s.theta * torch.matmul(q[:, :, None, :], Kw)[:, :, 0].float()                       # (nb,M,MC)
+        v = (torch.arange(M, device=dev)[:, None] + torch.arange(MC, device=dev)[None])[None] >= ds_loc[:, :, None]
+        sc = sc.masked_fill(~v, -1e9); any_ = v.any(2); a = F.softmax(sc, dim=2) * any_[..., None]
+        mx = torch.minimum(sc.max(2).values.clamp_min(-1.0), s.theta.detach().abs() + 1.0); g = torch.sigmoid(s.ga * mx + s.gb) * any_
+        A = torch.zeros(nb, M, Ls, dtype=a.dtype, device=dev); rows = torch.arange(M, device=dev)[:, None]; A[:, rows, rows + 2 + torch.arange(MC, device=dev)[None]] = a
+        cv = torch.bmm(A, s.E(X)) if CV else None                                                # (nb,M,d): 点で重みづけした語の意味ベクトル (行列積 1 回)
+        return a, g, cv, X.unfold(1, MC, 1)[:, 2:2 + M]
+
+    def logp_band(s, inp, X, y, ds_loc, M):
+        a, g, cv, Tw = s.band(X, ds_loc, M); nb = X.shape[0]
+        lp = F.log_softmax(F.linear(s.hidden(inp, None if cv is None else cv.reshape(nb * M, -1)), s.U), dim=1).gather(1, y[:, None])[:, 0]
+        pc = (a * (Tw == y.view(nb, M)[..., None]).float()).sum(2).reshape(-1)
+        return torch.log((1 - g.reshape(-1)) * lp.exp() + g.reshape(-1) * pc + 1e-12)
+
     def logp(s, inp, y):
         if 3 in s.feats:
             a, g = s.cache(inp); cv = s.ctxv(inp, a)
@@ -214,6 +236,8 @@ def main(cfg):
     if int(cfg.get('tf32', 0)): torch.backends.cuda.matmul.allow_tf32 = True; torch.backends.cudnn.allow_tf32 = True; torch.set_float32_matmul_precision('high')   # tf32=1: 行列積を TF32 で (出力層など)
     if int(cfg.get('compile', 0)): KQF = torch.compile(_kq_eager)
     W = '/tmp/tok'; d = cfg.get('d', 128); c = cfg.get('c', 8); L = cfg['L']; n = cfg.get('n', 256); kk = cfg.get('kk', 4); k = cfg.get('k', 4); B = cfg.get('B', 512)
+    SEQB = int(cfg.get('seqb', 0)); NBLK = int(cfg.get('nblk', 1))        # seqb=M: 連続した M 位置を 1 つの列として 文脈キャッシュを列ごとに 1 回で作る (nblk 本で 1 歩)
+    if SEQB: B = SEQB * NBLK
     feats = list(cfg.get('feats', [])); ntr = cfg['ntr']; lr = cfg.get('lr', 2e-3); lrs = cfg.get('lrs', 5e-3)
     offs8 = np.arange(1, c + 1); o1 = [1 + (np.arange(NS) * w) // NS for w in W1]; offs2 = np.arange(c + 1, W2 + 1)
     lp_ = W + '/lam.json'; lam = {int(a): b for a, b in json.load(open(lp_)).items()} if os.path.exists(lp_) else {2: 2.0, 3: 3.0, 4: 4.5, 5: 3.0}
@@ -226,6 +250,8 @@ def main(cfg):
     dsT = np.maximum(Dtr[np.maximum(np.searchsorted(Dtr, ptr, 'right') - 1, 0)], starts[ci]); DS = c + ci * bl + (dsT - starts[ci]); DS[:c] = u[:c]; del u, ci, loc, ptr, dsT
     cnt = np.bincount(S, minlength=V).astype(np.float64); pu = (cnt + 1) / (cnt.sum() + V); rar = -np.log2(pu); rar[0] = 0.0; rar[1] = 0.0
     pos = np.arange(c, N); pos = pos[S[pos] != 0]; rng.shuffle(pos); steps = len(pos) // B
+    if SEQB:
+        starts = np.arange(c, N - SEQB, SEQB); rng.shuffle(starts); pos = (starts[:, None] + np.arange(SEQB)[None]).reshape(-1); steps = len(pos) // B
     fast = (DEV.type == 'cuda' and int(cfg.get('fast', 1)) == 1) or int(cfg.get('fast', 1)) == 2; SPARSE = not fast   # fast=2: CPU で速い経路の試験
     net = Net(d, c, L, n, kk, k, feats, rar).to(DEV); npar = sum(p.numel() for p in net.parameters())
     lg('L=%d feats=%s B=%d 学習語 %d 歩数 %d パラメータ %.1fM 窓: 部品2=%d 部品3=%d' % (L, feats, B, len(pos), steps, npar / 1e6, W2, MC))
@@ -240,6 +266,15 @@ def main(cfg):
         S_t = torch.from_numpy(S).to(DEV); DS_t = torch.from_numpy(DS).to(DEV); pos_t = torch.from_numpy(pos).to(DEV)
         offs8_t = torch.from_numpy(offs8).to(DEV); o1_t = [torch.from_numpy(o).to(DEV) for o in o1]; offs2_t = torch.from_numpy(offs2).to(DEV)
         lg('GPU の速い経路: 入力の準備を GPU で行い、 疎な更新は LazyAdam')
+        feats_n3 = [f_ for f_ in feats if f_ != 3]
+        def loss_pos(pp_t):                                  # 1 歩の損失 (seqb なら 列ごとの一括計算)
+            y = S_t[pp_t]
+            if SEQB:
+                pb = pp_t.view(NBLK, SEQB); p0 = pb[:, 0]; Ls = SEQB + MC + 2
+                Xs = S_t[(p0[:, None] - (MC + 2) + torch.arange(Ls, device=DEV)[None]).clamp_min(0)]; dsl = DS_t[pb] - (p0 - (MC + 2))[:, None]
+                inp = make_inputs_t(S_t, pp_t, DS_t[pp_t], feats_n3, offs8_t, o1_t, offs2_t)
+                lp = net.logp_band(inp, Xs, y, dsl, SEQB); m_ = (y != 0).float(); return -(lp * m_).sum() / m_.sum().clamp_min(1.0)
+            return -net.logp(make_inputs_t(S_t, pp_t, DS_t[pp_t], feats, offs8_t, o1_t, offs2_t), y).mean()
 
     def nn_logp(T, p, ds, bs=1024):
         out = np.zeros(len(p)); net.eval()
@@ -262,14 +297,12 @@ def main(cfg):
     if use_graph:
         pos_buf = pos_t[:B].clone(); run_t = torch.zeros((), device=DEV); cg = None; side = torch.cuda.Stream()
         def g_step():
-            inp = make_inputs_t(S_t, pos_buf, DS_t[pos_buf], feats, offs8_t, o1_t, offs2_t); y = S_t[pos_buf]
-            loss = -net.logp(inp, y).mean(); loss.backward(); opt_s.step(); opt_d.step(); run_t.add_(loss.detach() / math.log(2)); return loss
+            loss = loss_pos(pos_buf); loss.backward(); opt_s.step(); opt_d.step(); run_t.add_(loss.detach() / math.log(2)); return loss
     if cfg.get('prof') and fast and DEV.type == 'cuda':       # 時間の内訳を測る (学習はしない): 入力の準備 / 順方向 / 逆方向 / 疎な更新 / 密な更新 を CUDA イベントで、 さらに 重い計算の上位を torch.profiler で
         ev_ = lambda: torch.cuda.Event(enable_timing=True)
         def one_step(st_, tm):
-            pp_t = pos_t[st_ * B:(st_ + 1) * B]; e = [ev_() for _ in range(6)]; e[0].record()
-            inp = make_inputs_t(S_t, pp_t, DS_t[pp_t], feats, offs8_t, o1_t, offs2_t); y = S_t[pp_t]; e[1].record()
-            loss = -net.logp(inp, y).mean(); e[2].record()
+            pp_t = pos_t[st_ * B:(st_ + 1) * B]; e = [ev_() for _ in range(6)]; e[0].record(); e[1].record()
+            loss = loss_pos(pp_t); e[2].record()
             opt_s.zero_grad(); opt_d.zero_grad(); loss.backward(); e[3].record()
             opt_s.step(); e[4].record(); opt_d.step(); e[5].record()
             if tm is not None: tm.append(e)
@@ -316,11 +349,10 @@ def main(cfg):
         else:
             for g in opt_d.param_groups: g['lr'] = lr * f
             for g in opt_s.param_groups: g['lr'] = lrs * f
-            if fast:
-                pp_t = pos_t[st * B:(st + 1) * B]; inp = make_inputs_t(S_t, pp_t, DS_t[pp_t], feats, offs8_t, o1_t, offs2_t); y = S_t[pp_t]
+            if fast: loss = loss_pos(pos_t[st * B:(st + 1) * B])
             else:
                 pp = pos[st * B:(st + 1) * B]; inp = make_inputs(S, pp, DS[pp], feats, offs8, o1, offs2); y = torch.from_numpy(S[pp]).to(DEV)
-            loss = -net.logp(inp, y).mean()
+                loss = -net.logp(inp, y).mean()
             run = run + loss.detach() / math.log(2); cnt_ += 1
             opt_s.zero_grad(); opt_d.zero_grad(); loss.backward(); opt_s.step(); opt_d.step()
         if (st + 1) % cfg.get('log_every', 500) == 0:
