@@ -24,6 +24,7 @@ def _kq_eager(ew, vv, e0, p0, p1):
     return F.normalize(kq, dim=-1)
 BF16 = False
 CV = False
+CHL = -1             # ctxh=l: l 層の後で 中間表現どうしで Attention (鍵と値が その位置の中間表現)。 -1 で なし
 CL = 0              # ctxl=N: 下の N 層で、 その層の中間表現から 文脈の語を引き直す (Attention を重ねる)
 KQF = _kq_eager        # main() が cfg compile=1 のとき torch.compile 版に差し替える
 
@@ -46,6 +47,7 @@ class Net(nn.Module):
         if 2 in feats: s.G2 = nn.Parameter(torch.full((d,), 0.1))
         if 3 in feats:
             s.Ek = nn.Embedding(V, DK, sparse=SPARSE); nn.init.normal_(s.Ek.weight, 0, 0.3)
+            if CHL >= 0: s.Wqh = nn.Parameter(torch.randn(d, DK) * d ** -0.5); s.Wkh = nn.Parameter(torch.randn(d, DK) * d ** -0.5); s.Gh = nn.Parameter(torch.full((d,), 0.02)); s.thh = nn.Parameter(torch.tensor(4.0))
             if CL: s.Wq = nn.ParameterList([nn.Parameter(torch.randn(d, DK) * d ** -0.5) for _ in range(CL)]); s.Gl = nn.Parameter(torch.full((CL, d), 0.02)); s.thl = nn.Parameter(torch.full((CL,), 4.0))
             if CV: s.Gc = nn.Parameter(torch.full((d,), 0.1))                      # ctxv=1: キャッシュの点で 文脈の語の意味ベクトルを 足し合わせて 入力に加える
             s.Pk = nn.Parameter(torch.ones(2, DK)); s.theta = nn.Parameter(torch.tensor(8.0)); s.ga = nn.Parameter(torch.tensor(1.0)); s.gb = nn.Parameter(torch.tensor(-2.0))
@@ -111,6 +113,53 @@ class Net(nn.Module):
     def ctxv(s, inp, a):
         if not CV: return None
         return F.embedding_bag(inp['f3_val'], s.E.weight, per_sample_weights=a, mode='sum', sparse=s.E.sparse)    # (B,d): 点 a で 重みづけした 文脈の語の意味ベクトル
+
+    def _base(s, inp, cv=None):
+        x = (s.E(inp['ctx']) * s.P[None]).sum(1)
+        if cv is not None: x = x + s.Gc[None] * cv
+        if 1 in s.feats:
+            ids1 = inp['f1_ids']; m1 = inp['f1_m']; w1 = m1 / m1.sum(2, keepdim=True).clamp_min(1.0)
+            mean = F.embedding_bag(ids1.reshape(-1, ids1.shape[2]), s.E.weight, per_sample_weights=w1.reshape(-1, ids1.shape[2]), mode='sum', sparse=s.E.sparse).view(ids1.shape[0], ids1.shape[1], -1)
+            x = x + (mean * s.G1[None]).sum(1)
+        if 2 in s.feats:
+            r = s.rar[inp['f2_ids']].masked_fill(~inp['f2_v'], -1.0)
+            tv, ti = r.topk(K2, dim=1); w = tv.clamp_min(0.0)
+            ids = inp['f2_ids'].gather(1, ti)
+            s2 = F.embedding_bag(ids, s.E.weight, per_sample_weights=w / (w.sum(1, keepdim=True) + 1e-6), mode='sum', sparse=s.E.sparse)
+            x = x + s.G2[None] * s2
+        return x
+
+    def _layer(s, l, x):
+        n, kk, k, h = s.n, s.kk, s.k, s.d // 2
+        q = s.rms(x); q1, q2 = q[:, :h], q[:, h:]
+        s1 = q1 @ s.K1[l].t() / math.sqrt(h); s2_ = q2 @ s.K2[l].t() / math.sqrt(h)
+        v1, i1 = s1.topk(kk, dim=1); v2, i2 = s2_.topk(kk, dim=1)
+        comb = (v1[:, :, None] + v2[:, None, :]).flatten(1)
+        sc, ix = comb.topk(k, dim=1)
+        a = F.softmax(sc / s.tau[l].abs().clamp_min(0.05), dim=1)
+        ia = i1.gather(1, ix // kk); ib = i2.gather(1, ix % kk); rows = ia * n + ib; s._rows[l] = rows.flatten()
+        return x + (a[:, :, None] * s.Val[l](rows)).sum(1)
+
+    def logp_band_h(s, inp, X, y, ds_all, M, H):
+        """ctxh: 連続した列で、 履歴 H 位置 + 予測 M 位置の中間表現を作り、 CHL 層の後で 予測位置が 直前 H 位置の中間表現へ Attention する。
+        inp: 履歴+予測の全位置 (nb*(H+M)) の入力。 X: 長さ (H+M)+MC+2 の語の列。 ds_all: (nb,H+M) 各位置の文書の開始 (X の中の番号)。 y: 予測位置の語 (nb*M)"""
+        nb = X.shape[0]; Ls = H + M; dev = X.device
+        a_c, g_c, cv, Tw = s.band(X, ds_all, Ls)
+        x = s._base(inp, None if cv is None else cv.reshape(nb * Ls, -1))
+        for l in range(CHL + 1): x = s._layer(l, x)
+        xs = x.view(nb, Ls, -1); r = s.rms(xs)
+        K = F.normalize(r @ s.Wkh, dim=-1); q = F.normalize(r[:, H:] @ s.Wqh, dim=-1)
+        Kw = K.unfold(1, H, 1)[:, :M]                                                  # (nb,M,DK,H): 位置 m の直前 H 位置の鍵
+        sc = s.thh * torch.matmul(q[:, :, None, :], Kw)[:, :, 0].float()               # (nb,M,H)
+        v = (torch.arange(M, device=dev)[:, None] + torch.arange(H, device=dev)[None])[None] >= ds_all[:, H:, None]
+        sc = sc.masked_fill(~v, -1e9); at = F.softmax(sc, dim=2) * v.any(2)[..., None]
+        A = torch.zeros(nb, M, Ls, dtype=at.dtype, device=dev); rows = torch.arange(M, device=dev)[:, None]; A[:, rows, rows + torch.arange(H, device=dev)[None]] = at
+        xq = xs[:, H:] + s.Gh[None, None] * torch.bmm(A, r)
+        xq = xq.reshape(nb * M, -1)
+        for l in range(CHL + 1, s.L): xq = s._layer(l, xq)
+        lp = F.log_softmax(F.linear(s.rms(xq), s.U), dim=1).gather(1, y[:, None])[:, 0]
+        pc = (a_c[:, H:] * (Tw[:, H:] == y.view(nb, M)[..., None]).float()).sum(2).reshape(-1); g = g_c[:, H:].reshape(-1)
+        return torch.log((1 - g) * lp.exp() + g * pc + 1e-12)
 
     def band(s, X, ds_loc, M):
         """連続した M 個の位置の 文脈キャッシュ (鍵・点・値の足し合わせ) を 列ごとに 1 回で作る (位置ごとに 窓を引き直さない)。
@@ -230,8 +279,8 @@ def main(cfg):
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
     MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2); NS = cfg.get('ns', NS); K2 = cfg.get('k2', K2)
-    global KQF, BF16, CV, CL
-    CV = bool(int(cfg.get('ctxv', 0))); CL = int(cfg.get('ctxl', 0))
+    global KQF, BF16, CV, CL, CHL
+    CV = bool(int(cfg.get('ctxv', 0))); CL = int(cfg.get('ctxl', 0)); CHL = int(cfg.get('ctxh', -1)); HIST = int(cfg.get('hist', 512))
     BF16 = bool(int(cfg.get('bf16', 0)))
     if int(cfg.get('tf32', 0)): torch.backends.cuda.matmul.allow_tf32 = True; torch.backends.cudnn.allow_tf32 = True; torch.set_float32_matmul_precision('high')   # tf32=1: 行列積を TF32 で (出力層など)
     if int(cfg.get('compile', 0)): KQF = torch.compile(_kq_eager)
@@ -251,7 +300,7 @@ def main(cfg):
     cnt = np.bincount(S, minlength=V).astype(np.float64); pu = (cnt + 1) / (cnt.sum() + V); rar = -np.log2(pu); rar[0] = 0.0; rar[1] = 0.0
     pos = np.arange(c, N); pos = pos[S[pos] != 0]; rng.shuffle(pos); steps = len(pos) // B
     if SEQB:
-        starts = np.arange(c, N - SEQB, SEQB); rng.shuffle(starts); pos = (starts[:, None] + np.arange(SEQB)[None]).reshape(-1); steps = len(pos) // B
+        starts = np.arange(c + (HIST + MC + 2 if CHL >= 0 else 0), N - SEQB, SEQB); rng.shuffle(starts); pos = (starts[:, None] + np.arange(SEQB)[None]).reshape(-1); steps = len(pos) // B
     fast = (DEV.type == 'cuda' and int(cfg.get('fast', 1)) == 1) or int(cfg.get('fast', 1)) == 2; SPARSE = not fast   # fast=2: CPU で速い経路の試験
     net = Net(d, c, L, n, kk, k, feats, rar).to(DEV); npar = sum(p.numel() for p in net.parameters())
     lg('L=%d feats=%s B=%d 学習語 %d 歩数 %d パラメータ %.1fM 窓: 部品2=%d 部品3=%d' % (L, feats, B, len(pos), steps, npar / 1e6, W2, MC))
@@ -269,6 +318,12 @@ def main(cfg):
         feats_n3 = [f_ for f_ in feats if f_ != 3]
         def loss_pos(pp_t):                                  # 1 歩の損失 (seqb なら 列ごとの一括計算)
             y = S_t[pp_t]
+            if SEQB and CHL >= 0:                           # ctxh: 履歴 HIST 位置 + 予測 SEQB 位置の中間表現どうしで Attention
+                pb = pp_t.view(NBLK, SEQB); p0 = pb[:, 0]; Lq = HIST + SEQB; ar_ = torch.arange(Lq, device=DEV)[None]
+                pa = (p0[:, None] - HIST + ar_).reshape(-1); Xe = S_t[(p0[:, None] - HIST - MC - 2 + torch.arange(Lq + MC + 2, device=DEV)[None]).clamp_min(0)]
+                dsa = DS_t[pa].view(NBLK, Lq) - (p0 - HIST - MC - 2)[:, None]
+                inp = make_inputs_t(S_t, pa, DS_t[pa], feats_n3, offs8_t, o1_t, offs2_t)
+                lp = net.logp_band_h(inp, Xe, y, dsa, SEQB, HIST); m_ = (y != 0).float(); return -(lp * m_).sum() / m_.sum().clamp_min(1.0)
             if SEQB:
                 pb = pp_t.view(NBLK, SEQB); p0 = pb[:, 0]; Ls = SEQB + MC + 2
                 Xs = S_t[(p0[:, None] - (MC + 2) + torch.arange(Ls, device=DEV)[None]).clamp_min(0)]; dsl = DS_t[pb] - (p0 - (MC + 2))[:, None]
@@ -276,7 +331,22 @@ def main(cfg):
                 lp = net.logp_band(inp, Xs, y, dsl, SEQB); m_ = (y != 0).float(); return -(lp * m_).sum() / m_.sum().clamp_min(1.0)
             return -net.logp(make_inputs_t(S_t, pp_t, DS_t[pp_t], feats, offs8_t, o1_t, offs2_t), y).mean()
 
-    def nn_logp(T, p, ds, bs=1024):
+    def nn_logp_blocks(T, D, starts, bs=4):                  # ctxh: 連続した列 (starts から SEQB 位置) ごとに 履歴つきで 損失を出す
+        out = np.zeros((len(starts), SEQB)); net.eval(); Tt = torch.from_numpy(T.astype(np.int64)).to(DEV); Dt = torch.from_numpy(np.asarray(D).astype(np.int64)).to(DEV); Lq = HIST + SEQB
+        with torch.no_grad():
+            for a in range(0, len(starts), bs):
+                st_ = torch.from_numpy(starts[a:a + bs].astype(np.int64)).to(DEV); nb_ = len(st_)
+                pa = (st_[:, None] - HIST + torch.arange(Lq, device=DEV)[None]).reshape(-1); dsa = Dt[(torch.searchsorted(Dt, pa, right=True) - 1).clamp_min(0)]
+                Xe = Tt[(st_[:, None] - HIST - MC - 2 + torch.arange(Lq + MC + 2, device=DEV)[None]).clamp_min(0)]
+                inp = make_inputs_t(Tt, pa, dsa, [f_ for f_ in feats if f_ != 3], offs8_t, o1_t, offs2_t); y = Tt[(st_[:, None] + torch.arange(SEQB, device=DEV)[None]).reshape(-1)]
+                lp = net.logp_band_h(inp, Xe, y, dsa.view(nb_, Lq) - (st_ - HIST - MC - 2)[:, None], SEQB, HIST)
+                out[a:a + nb_] = (lp / math.log(2)).view(nb_, SEQB).cpu().numpy()
+        net.train(); return out
+
+    def nn_logp(T, p, ds, bs=1024, starts=None, D=None):
+        if CHL >= 0 and starts is not None:
+            full = nn_logp_blocks(T, D, starts).reshape(-1); Pall = (starts[:, None] + np.arange(SEQB)[None]).reshape(-1)
+            u, iu = np.unique(Pall, return_index=True); return full[iu[np.searchsorted(u, p)]]
         out = np.zeros(len(p)); net.eval()
         with torch.no_grad():
             for a in range(0, len(p), bs):
@@ -288,12 +358,19 @@ def main(cfg):
         T = np.fromfile('%s/%s.bin' % (W, sp_), dtype=np.uint16).astype(np.int64); D = np.load('%s/%s_docs.npy' % (W, sp_)); return T, D
     def ds_of(D, p): return D[np.maximum(np.searchsorted(D, p, 'right') - 1, 0)]
     rng_ev = np.random.default_rng(int(cfg.get('eval_seed', 777)))      # 評価の位置は 学習の乱数と切り離して固定 (構成を変えても 同じ位置で測る)
+    def evalset_h(T, D, nn_, nlong):                        # ctxh: 評価の位置は 連続した列 (SEQB 位置) をいくつか
+        nbk = -(-int(nn_ * 1.02) // SEQB); lo = c + HIST + MC + 2 + 16
+        starts = np.sort(rng_ev.integers(lo, len(T) - SEQB, nbk)); Pall = (starts[:, None] + np.arange(SEQB)[None]).reshape(-1)
+        p = Pall[T[Pall] != 0][:nn_]; q = Pall[(T[Pall] != 0) & ((Pall - ds_of(D, Pall)) >= 256)][:nlong]; return np.r_[p, q], len(p), starts
     def evalset(T, D, nn_, nlong):
         p = rng_ev.integers(16 + c, len(T), int(nn_ * 1.02)); p = p[T[p] != 0][:nn_]
         q = rng_ev.integers(16 + c, len(T), 4000000); q = q[(T[q] != 0) & ((q - ds_of(D, q)) >= 256)][:nlong]; return np.r_[p, q], len(p)
     ev = {}
     for sp_, nn_ in (('val', cfg['nval']), ('test', cfg['ntest'])):
-        T, D = load_split(sp_); p, nmain = evalset(T, D, nn_, cfg.get('nlong', 40000)); ev[sp_] = dict(T=T, D=D, p=p, nmain=nmain, ds=ds_of(D, p))
+        T, D = load_split(sp_); starts_ = None
+        if CHL >= 0: p, nmain, starts_ = evalset_h(T, D, nn_, cfg.get('nlong', 40000))
+        else: p, nmain = evalset(T, D, nn_, cfg.get('nlong', 40000))
+        ev[sp_] = dict(T=T, D=D, p=p, nmain=nmain, ds=ds_of(D, p), starts=starts_)
     offs = np.arange(1, c + 1); curve = []; run = 0.0; cnt_ = 0; ts = time.time()
     if use_graph:
         pos_buf = pos_t[:B].clone(); run_t = torch.zeros((), device=DEV); cg = None; side = torch.cuda.Stream()
@@ -382,7 +459,7 @@ def main(cfg):
     parts = {}
     for sp_ in ('val', 'test'):
         e_ = ev[sp_]; T = e_['T']; p = e_['p']; lp, hi = M.logprob_at(T.astype(np.uint16), p, return_hi=True)
-        parts[sp_] = dict(ng=2.0 ** lp, hi=hi, nn=2.0 ** nn_logp(T, p, e_['ds']), uni=pu[T[p]], depth=p - e_['ds'], nmain=e_['nmain'])
+        parts[sp_] = dict(ng=2.0 ** lp, hi=hi, nn=2.0 ** nn_logp(T, p, e_['ds'], starts=e_.get('starts'), D=e_['D']), uni=pu[T[p]], depth=p - e_['ds'], nmain=e_['nmain'])
     G = np.r_[0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9]
     bins = lambda pl: np.clip((-np.log2(np.maximum(pl, 1e-12)) // 2).astype(int), 0, 7)
     bits = lambda P, m=None: float(-np.log2(P if m is None else P[m]).mean())
