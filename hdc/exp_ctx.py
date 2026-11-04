@@ -203,11 +203,11 @@ def make_inputs(T, pos, ds, feats, offs8, o1, offs2):
 
 
 def main(cfg):
-    global MC, W2, NS, W1, DEV, SPARSE
+    global MC, W2, NS, W1, DEV, SPARSE, K2
     DEV = torch.device(cfg.get('device') or ('cuda' if torch.cuda.is_available() else 'cpu'))
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
-    MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2)
+    MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2); NS = cfg.get('ns', NS); K2 = cfg.get('k2', K2)
     global KQF, BF16, CV, CL
     CV = bool(int(cfg.get('ctxv', 0))); CL = int(cfg.get('ctxl', 0))
     BF16 = bool(int(cfg.get('bf16', 0)))
