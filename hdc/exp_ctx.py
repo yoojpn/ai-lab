@@ -29,7 +29,28 @@ CL = 0              # ctxl=N: 下の N 層で、 その層の中間表現から 
 KQF = _kq_eager        # main() が cfg compile=1 のとき torch.compile 版に差し替える
 
 
+class RowGather(torch.autograd.Function):
+    """表の行を引く。 逆伝播では 大きな表の密な勾配を作らず、 触った行だけ sink (表と同じ形の 常に 0 の置き場) に足し込む。
+    オプティマイザは 触った行だけ sink から読んで更新し、 その行を 0 に戻す (vsink=1)。"""
+    @staticmethod
+    def forward(ctx, W, idx, sink):
+        ctx.save_for_backward(idx); ctx.sink = sink
+        return W[idx]
+
+    @staticmethod
+    def backward(ctx, g):
+        idx, = ctx.saved_tensors
+        ctx.sink.index_add_(0, idx.reshape(-1), g.reshape(-1, g.shape[-1]).to(ctx.sink.dtype))
+        return None, None, None
+
+
 class Net(nn.Module):
+    VSINK = False                                    # main() が cfg vsink=1 のとき True にして net.Vsink を用意する
+
+    def _val(s, l, rows):
+        if s.VSINK: return RowGather.apply(s.Val[l].weight, rows, s.Vsink[l])
+        return s.Val[l](rows)
+
     def __init__(s, d, c, L, n, kk, k, feats, rar):
         super().__init__()
         s.d, s.c, s.L, s.n, s.kk, s.k, s.feats = d, c, L, n, kk, k, feats
@@ -91,7 +112,7 @@ class Net(nn.Module):
             sc, ix = comb.topk(k, dim=1)
             a = F.softmax(sc / s.tau[l].abs().clamp_min(0.05), dim=1)
             ia = i1.gather(1, ix // kk); ib = i2.gather(1, ix % kk); rows = ia * n + ib; s._rows[l] = rows.flatten()
-            x = x + (a[:, :, None] * s.Val[l](rows)).sum(1)
+            x = x + (a[:, :, None] * s._val(l, rows)).sum(1)
         return s.rms(x)
 
     def cache(s, inp):
@@ -138,7 +159,7 @@ class Net(nn.Module):
         sc, ix = comb.topk(k, dim=1)
         a = F.softmax(sc / s.tau[l].abs().clamp_min(0.05), dim=1)
         ia = i1.gather(1, ix // kk); ib = i2.gather(1, ix % kk); rows = ia * n + ib; s._rows[l] = rows.flatten()
-        return x + (a[:, :, None] * s.Val[l](rows)).sum(1)
+        return x + (a[:, :, None] * s._val(l, rows)).sum(1)
 
     def logp_band_h(s, inp, X, y, ds_all, M, H):
         """ctxh: 連続した列で、 履歴 H 位置 + 予測 M 位置の中間表現を作り、 CHL 層の後で 予測位置が 直前 H 位置の中間表現へ Attention する。
@@ -204,8 +225,9 @@ class Net(nn.Module):
 
 class LazyAdam:
     """SparseAdam と同じ計算 (勾配が 0 でない行だけ更新) を 密な勾配で GPU 上で行う。"""
-    def __init__(s, params, lr, betas=(0.9, 0.999), eps=1e-8, rowsrc=None):
-        s.rowsrc = rowsrc or {}      # {id(重み): その歩に使った行の番号を返す関数}  (あれば その行だけ更新: 同じ番号が重なっても同じ値を書くだけ)
+    def __init__(s, params, lr, betas=(0.9, 0.999), eps=1e-8, rowsrc=None, sinks=None):
+        s.sinks = sinks or {}        # {id(重み): sink}  あれば p.grad の代わりに sink の触った行を読み、 読んだ行を 0 に戻す
+        s.rowsrc = rowsrc or {}    # {id(重み): その歩に使った行の番号を返す関数}  (あれば その行だけ更新: 同じ番号が重なっても同じ値を書くだけ)
         s.param_groups = [{'params': list(params), 'lr': lr}]; s.b1, s.b2 = betas; s.eps = eps; s.st = {}
         s.t = torch.zeros((), device=s.param_groups[0]['params'][0].device)   # 歩数 (GPU の上のテンソル: CUDA グラフに記録できる)
 
@@ -218,7 +240,7 @@ class LazyAdam:
         s.t.add_(1); bc1 = 1 - s.b1 ** s.t; bc2 = 1 - s.b2 ** s.t
         for g in s.param_groups:
             for p in g['params']:
-                G = p.grad
+                G = s.sinks[id(p)] if id(p) in s.sinks else p.grad
                 if G is None: continue
                 if id(p) not in s.st: s.st[id(p)] = (torch.zeros_like(p), torch.zeros_like(p))
                 m, v = s.st[id(p)]
@@ -226,6 +248,7 @@ class LazyAdam:
                     idx = s.rowsrc[id(p)](); Gs = G[idx]; mn = s.b1 * m[idx] + (1 - s.b1) * Gs; vn = s.b2 * v[idx] + (1 - s.b2) * Gs * Gs
                     upd = (g['lr'] * bc2.sqrt() / bc1) * mn / (vn.sqrt() + s.eps)
                     m[idx] = mn; v[idx] = vn; p[idx] = p[idx] - upd
+                    if id(p) in s.sinks: G[idx] = 0.0       # 読んだ行を 0 に戻す (重なった番号も同じ 0 を書くだけ)
                     continue
                 mask = (G != 0).any(1, keepdim=True)
                 m.copy_(torch.where(mask, s.b1 * m + (1 - s.b1) * G, m)); v.copy_(torch.where(mask, s.b2 * v + (1 - s.b2) * G * G, v))
@@ -306,10 +329,14 @@ def main(cfg):
     lg('L=%d feats=%s B=%d 学習語 %d 歩数 %d パラメータ %.1fM 窓: 部品2=%d 部品3=%d' % (L, feats, B, len(pos), steps, npar / 1e6, W2, MC))
     use_graph = bool(fast and DEV.type == 'cuda' and int(cfg.get('graph', 1)))
     rowsrc = {id(v_.weight): (lambda l_=l_: net._rows[l_]) for l_, v_ in enumerate(net.Val)} if int(cfg.get('rowwise', 1)) else {}
+    sinks = {}
+    if int(cfg.get('vsink', 0)) and fast and rowsrc:         # Val の密な勾配 (毎歩 全体の 0 埋め・足し算) をやめ、 触った行だけ足し込む
+        Net.VSINK = True; net.Vsink = [torch.zeros_like(v_.weight) for v_ in net.Val]; sinks = {id(v_.weight): net.Vsink[l_] for l_, v_ in enumerate(net.Val)}
+        for v_ in net.Val: v_.weight.requires_grad_(True)
     if use_graph:
-        opt_s = LazyAdam(net.sparse_params(), lr=torch.tensor(lrs, device=DEV), rowsrc=rowsrc); opt_d = torch.optim.Adam(net.dense_params(), lr=torch.tensor(lr, device=DEV), capturable=True)
+        opt_s = LazyAdam(net.sparse_params(), lr=torch.tensor(lrs, device=DEV), rowsrc=rowsrc, sinks=sinks); opt_d = torch.optim.Adam(net.dense_params(), lr=torch.tensor(lr, device=DEV), capturable=True)
     else:
-        opt_s = LazyAdam(net.sparse_params(), lr=lrs, rowsrc=rowsrc) if fast else torch.optim.SparseAdam(net.sparse_params(), lr=lrs); opt_d = torch.optim.Adam(net.dense_params(), lr=lr)
+        opt_s = LazyAdam(net.sparse_params(), lr=lrs, rowsrc=rowsrc, sinks=sinks) if fast else torch.optim.SparseAdam(net.sparse_params(), lr=lrs); opt_d = torch.optim.Adam(net.dense_params(), lr=lr)
     warm = cfg.get('warm', 200)
     if fast:
         S_t = torch.from_numpy(S).to(DEV); DS_t = torch.from_numpy(DS).to(DEV); pos_t = torch.from_numpy(pos).to(DEV)
