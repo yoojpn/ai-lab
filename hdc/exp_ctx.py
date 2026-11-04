@@ -368,7 +368,7 @@ def main(cfg):
     ev = {}
     for sp_, nn_ in (('val', cfg['nval']), ('test', cfg['ntest'])):
         T, D = load_split(sp_); starts_ = None
-        if CHL >= 0: p, nmain, starts_ = evalset_h(T, D, nn_, cfg.get('nlong', 40000))
+        if CHL >= 0 or int(cfg.get('eval_blocks', 0)): p, nmain, starts_ = evalset_h(T, D, nn_, cfg.get('nlong', 40000))      # eval_blocks=1: ctxh なしでも 同じ (連続した列の) 位置で測る
         else: p, nmain = evalset(T, D, nn_, cfg.get('nlong', 40000))
         ev[sp_] = dict(T=T, D=D, p=p, nmain=nmain, ds=ds_of(D, p), starts=starts_)
     offs = np.arange(1, c + 1); curve = []; run = 0.0; cnt_ = 0; ts = time.time()
