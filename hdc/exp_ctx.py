@@ -339,7 +339,7 @@ def main(cfg):
                     except Exception as e_:
                         lg('CUDA グラフは使えませんでした (%r)。 通常の速い経路に戻します' % (e_,)); use_graph = False; cg = None; torch.cuda.synchronize(); run = float(run_t); continue
                     with torch.no_grad():                # 自己確認: 同じ重み・同じ入力で、 通常の経路の損失と記録の再生の損失が一致するか
-                        l_e = float(-net.logp(make_inputs_t(S_t, pos_buf, DS_t[pos_buf], feats, offs8_t, o1_t, offs2_t), S_t[pos_buf]).mean())
+                        l_e = float(loss_pos(pos_buf))
                     cg.replay(); l_g = float(loss_g)
                     lg('CUDA グラフの自己確認: 通常 %.5f | 再生 %.5f (差 %.1e)' % (l_e, l_g, abs(l_e - l_g)))
                     if abs(l_e - l_g) > 2e-3: raise RuntimeError('CUDA グラフの再生が通常の経路と合いません')
