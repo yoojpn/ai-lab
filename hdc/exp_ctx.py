@@ -248,7 +248,7 @@ class LazyAdam:
                     idx = s.rowsrc[id(p)](); Gs = G[idx]; mn = s.b1 * m[idx] + (1 - s.b1) * Gs; vn = s.b2 * v[idx] + (1 - s.b2) * Gs * Gs
                     upd = (g['lr'] * bc2.sqrt() / bc1) * mn / (vn.sqrt() + s.eps)
                     m[idx] = mn; v[idx] = vn; p[idx] = p[idx] - upd
-                    if id(p) in s.sinks: G[idx] = 0.0       # 読んだ行を 0 に戻す (重なった番号も同じ 0 を書くだけ)
+                    if id(p) in s.sinks: G.index_fill_(0, idx, 0.0)       # 読んだ行を 0 に戻す (CUDA グラフに記録できる形)
                     continue
                 mask = (G != 0).any(1, keepdim=True)
                 m.copy_(torch.where(mask, s.b1 * m + (1 - s.b1) * G, m)); v.copy_(torch.where(mask, s.b2 * v + (1 - s.b2) * G * G, v))
