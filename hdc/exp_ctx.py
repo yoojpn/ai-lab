@@ -75,7 +75,7 @@ class Net(nn.Module):
         if VFAC:
             f_ = (0.02 / VFAC ** 0.5) ** 0.5            # R 個の積の和の標準偏差が 0.02 になる大きさ
             s.VA = nn.ParameterList([nn.Parameter(torch.randn(VFAC, n, d) * f_) for _ in range(L)]); s.VB = nn.ParameterList([nn.Parameter(torch.randn(VFAC, n, d) * f_) for _ in range(L)])
-        s._rows = [None] * L
+        s._rows = [None] * L; s._aux = 0.0
         if HNG: s.H = nn.Embedding(1 << HNG, d, sparse=SPARSE); nn.init.normal_(s.H.weight, 0, 0.05); s._hrows = None
         s.tau = nn.Parameter(torch.ones(max(L, 1)))
         s.U = nn.Parameter(torch.randn(V, d) * 0.05)
@@ -126,7 +126,7 @@ class Net(nn.Module):
             q = s.rms(x); q1, q2 = q[:, :h], q[:, h:]
             s1 = q1 @ s.K1[l].t() / math.sqrt(h); s2_ = q2 @ s.K2[l].t() / math.sqrt(h)
             v1, i1 = s1.topk(kk, dim=1); v2, i2 = s2_.topk(kk, dim=1)
-            if BAL and torch.is_grad_enabled():                                          # 鍵の使われ方を ならす (選ばれた割合 f と 平均確率 P の積)
+            if BAL:                                          # 鍵の使われ方を ならす (選ばれた割合 f と 平均確率 P の積)
                 for sc_, ii_ in ((s1, i1), (s2_, i2)):
                     f_ = torch.zeros(n, device=sc_.device).scatter_add_(0, ii_.reshape(-1), torch.ones(ii_.numel(), device=sc_.device)) / ii_.numel()
                     s._aux = s._aux + n * (f_.detach() * F.softmax(sc_.float(), dim=1).mean(0)).sum()
@@ -178,7 +178,7 @@ class Net(nn.Module):
         q = s.rms(x); q1, q2 = q[:, :h], q[:, h:]
         s1 = q1 @ s.K1[l].t() / math.sqrt(h); s2_ = q2 @ s.K2[l].t() / math.sqrt(h)
         v1, i1 = s1.topk(kk, dim=1); v2, i2 = s2_.topk(kk, dim=1)
-        if BAL and torch.is_grad_enabled():                                          # 鍵の使われ方を ならす (選ばれた割合 f と 平均確率 P の積)
+        if BAL:                                          # 鍵の使われ方を ならす (選ばれた割合 f と 平均確率 P の積)
             for sc_, ii_ in ((s1, i1), (s2_, i2)):
                 f_ = torch.zeros(n, device=sc_.device).scatter_add_(0, ii_.reshape(-1), torch.ones(ii_.numel(), device=sc_.device)) / ii_.numel()
                 s._aux = s._aux + n * (f_.detach() * F.softmax(sc_.float(), dim=1).mean(0)).sum()
