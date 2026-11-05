@@ -41,3 +41,8 @@ o3 = X.LazyAdam(net3.sparse_params(), lr=1e-2, rowsrc=rs); w0 = net3.H.weight.de
 inp = X.make_inputs_t(T, pos, ds[pos], [1, 2, 3], offs8, o1, offs2); a, g = net3.cache(inp); h = net3.hidden(inp, net3.ctxv(inp, a))
 l3 = ((h @ net3.U.t()).log_softmax(1)[torch.arange(64), T[pos]]).mean().neg(); o3.zero_grad(); l3.backward(); o3.step()
 ch = (net3.H.weight.detach() != w0).any(1).sum().item(); print('hng 損失', l3.item(), '更新された行', ch, '(引いた行 最大', len(set(net3._hrows.tolist())), ')')
+
+# bal: 補助損失が正で、鍵 K1 に勾配が届く
+X.BAL = 0.01; X.HNG = 0; net4 = X.Net(d, c, L, n, kk, k, [1, 2, 3], rar); net4._aux = 0.0
+inp = X.make_inputs_t(T, pos, ds[pos], [1, 2, 3], offs8, o1, offs2); a, g = net4.cache(inp); h = net4.hidden(inp, net4.ctxv(inp, a))
+aux = net4._aux; aux.backward(); print('bal 補助損失 %.3f (一様なら %d)' % (aux.item(), 2 * L), '| K1 勾配ノルム', net4.K1[0].grad.norm().item()); X.BAL = 0.0

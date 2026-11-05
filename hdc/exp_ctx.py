@@ -25,6 +25,7 @@ def _kq_eager(ew, vv, e0, p0, p1):
 BF16 = False
 CV = False
 CHL = -1             # ctxh=l: l 層の後で 中間表現どうしで Attention (鍵と値が その位置の中間表現)。 -1 で なし
+BAL = 0.0           # bal=a: ルーティングの偏りを減らす補助損失 (Switch 型: 選ばれた割合 × 平均確率) の係数。 0 で なし
 HNG = 0             # hng=B: 直前2語・3語のハッシュ (2^B 行の表) で行を引いて x に足す (語の組み合わせを表引きの段階で作る)。 0 で なし
 VFAC = 0            # vfac=R: Val の行 (ia,ib) を R 個の 共有部品の積の和 VA[ia]*VB[ib] で作る (行どうしで部品を共有)。 0 で なし
 VFULL = True        # vfull=0: 全行の表 Val をやめて 共有部品だけにする (vfac>0 のとき)
@@ -125,6 +126,10 @@ class Net(nn.Module):
             q = s.rms(x); q1, q2 = q[:, :h], q[:, h:]
             s1 = q1 @ s.K1[l].t() / math.sqrt(h); s2_ = q2 @ s.K2[l].t() / math.sqrt(h)
             v1, i1 = s1.topk(kk, dim=1); v2, i2 = s2_.topk(kk, dim=1)
+            if BAL and torch.is_grad_enabled():                                          # 鍵の使われ方を ならす (選ばれた割合 f と 平均確率 P の積)
+                for sc_, ii_ in ((s1, i1), (s2_, i2)):
+                    f_ = torch.zeros(n, device=sc_.device).scatter_add_(0, ii_.reshape(-1), torch.ones(ii_.numel(), device=sc_.device)) / ii_.numel()
+                    s._aux = s._aux + n * (f_.detach() * F.softmax(sc_.float(), dim=1).mean(0)).sum()
             comb = (v1[:, :, None] + v2[:, None, :]).flatten(1)
             sc, ix = comb.topk(k, dim=1)
             a = F.softmax(sc / s.tau[l].abs().clamp_min(0.05), dim=1)
@@ -173,6 +178,10 @@ class Net(nn.Module):
         q = s.rms(x); q1, q2 = q[:, :h], q[:, h:]
         s1 = q1 @ s.K1[l].t() / math.sqrt(h); s2_ = q2 @ s.K2[l].t() / math.sqrt(h)
         v1, i1 = s1.topk(kk, dim=1); v2, i2 = s2_.topk(kk, dim=1)
+        if BAL and torch.is_grad_enabled():                                          # 鍵の使われ方を ならす (選ばれた割合 f と 平均確率 P の積)
+            for sc_, ii_ in ((s1, i1), (s2_, i2)):
+                f_ = torch.zeros(n, device=sc_.device).scatter_add_(0, ii_.reshape(-1), torch.ones(ii_.numel(), device=sc_.device)) / ii_.numel()
+                s._aux = s._aux + n * (f_.detach() * F.softmax(sc_.float(), dim=1).mean(0)).sum()
         comb = (v1[:, :, None] + v2[:, None, :]).flatten(1)
         sc, ix = comb.topk(k, dim=1)
         a = F.softmax(sc / s.tau[l].abs().clamp_min(0.05), dim=1)
@@ -320,7 +329,8 @@ def main(cfg):
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
     MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2); NS = cfg.get('ns', NS); K2 = cfg.get('k2', K2)
-    global KQF, BF16, CV, CL, CHL, VFAC, VFULL, HNG
+    global KQF, BF16, CV, CL, CHL, VFAC, VFULL, HNG, BAL
+    BAL = float(cfg.get('bal', 0.0))
     HNG = int(cfg.get('hng', 0))
     VFAC = int(cfg.get('vfac', 0)); VFULL = bool(int(cfg.get('vfull', 1)))
     CV = bool(int(cfg.get('ctxv', 0))); CL = int(cfg.get('ctxl', 0)); CHL = int(cfg.get('ctxh', -1)); HIST = int(cfg.get('hist', 512))
@@ -378,6 +388,10 @@ def main(cfg):
                 inp = make_inputs_t(S_t, pp_t, DS_t[pp_t], feats_n3, offs8_t, o1_t, offs2_t)
                 lp = net.logp_band(inp, Xs, y, dsl, SEQB); m_ = (y != 0).float(); return -(lp * m_).sum() / m_.sum().clamp_min(1.0)
             return -net.logp(make_inputs_t(S_t, pp_t, DS_t[pp_t], feats, offs8_t, o1_t, offs2_t), y).mean()
+        if BAL:
+            _lp0 = loss_pos
+            def loss_pos(pp_t):
+                net._aux = 0.0; l_ = _lp0(pp_t); return l_ + BAL * net._aux
 
     def nn_logp_blocks(T, D, starts, bs=4):                  # ctxh: 連続した列 (starts から SEQB 位置) ごとに 履歴つきで 損失を出す
         out = np.zeros((len(starts), SEQB)); net.eval(); Tt = torch.from_numpy(T.astype(np.int64)).to(DEV); Dt = torch.from_numpy(np.asarray(D).astype(np.int64)).to(DEV); Lq = HIST + SEQB
