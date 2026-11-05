@@ -25,6 +25,8 @@ def _kq_eager(ew, vv, e0, p0, p1):
 BF16 = False
 CV = False
 CHL = -1             # ctxh=l: l 層の後で 中間表現どうしで Attention (鍵と値が その位置の中間表現)。 -1 で なし
+VFAC = 0            # vfac=R: Val の行 (ia,ib) を R 個の 共有部品の積の和 VA[ia]*VB[ib] で作る (行どうしで部品を共有)。 0 で なし
+VFULL = True        # vfull=0: 全行の表 Val をやめて 共有部品だけにする (vfac>0 のとき)
 CL = 0              # ctxl=N: 下の N 層で、 その層の中間表現から 文脈の語を引き直す (Attention を重ねる)
 KQF = _kq_eager        # main() が cfg compile=1 のとき torch.compile 版に差し替える
 
@@ -48,8 +50,11 @@ class Net(nn.Module):
     VSINK = False                                    # main() が cfg vsink=1 のとき True にして net.Vsink を用意する
 
     def _val(s, l, rows):
-        if s.VSINK: return RowGather.apply(s.Val[l].weight, rows, s.Vsink[l])
-        return s.Val[l](rows)
+        o = 0
+        if len(s.Val): o = RowGather.apply(s.Val[l].weight, rows, s.Vsink[l]) if s.VSINK else s.Val[l](rows)
+        if VFAC:
+            ia = rows // s.n; ib = rows % s.n; o = o + (s.VA[l][:, ia] * s.VB[l][:, ib]).sum(0)
+        return o
 
     def __init__(s, d, c, L, n, kk, k, feats, rar):
         super().__init__()
@@ -58,8 +63,11 @@ class Net(nn.Module):
         s.P = nn.Parameter(torch.randn(c, d) * 0.1 + 1.0)
         s.K1 = nn.ParameterList([nn.Parameter(torch.randn(n, d // 2) * 0.5) for _ in range(L)])
         s.K2 = nn.ParameterList([nn.Parameter(torch.randn(n, d // 2) * 0.5) for _ in range(L)])
-        s.Val = nn.ModuleList([nn.Embedding(n * n, d, sparse=SPARSE) for _ in range(L)])
+        s.Val = nn.ModuleList([nn.Embedding(n * n, d, sparse=SPARSE) for _ in range(L)] if (VFULL or not VFAC) else [])
         for v in s.Val: nn.init.normal_(v.weight, 0, 0.02)
+        if VFAC:
+            f_ = (0.02 / VFAC ** 0.5) ** 0.5            # R 個の積の和の標準偏差が 0.02 になる大きさ
+            s.VA = nn.ParameterList([nn.Parameter(torch.randn(VFAC, n, d) * f_) for _ in range(L)]); s.VB = nn.ParameterList([nn.Parameter(torch.randn(VFAC, n, d) * f_) for _ in range(L)])
         s._rows = [None] * L
         s.tau = nn.Parameter(torch.ones(max(L, 1)))
         s.U = nn.Parameter(torch.randn(V, d) * 0.05)
@@ -302,7 +310,8 @@ def main(cfg):
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
     MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2); NS = cfg.get('ns', NS); K2 = cfg.get('k2', K2)
-    global KQF, BF16, CV, CL, CHL
+    global KQF, BF16, CV, CL, CHL, VFAC, VFULL
+    VFAC = int(cfg.get('vfac', 0)); VFULL = bool(int(cfg.get('vfull', 1)))
     CV = bool(int(cfg.get('ctxv', 0))); CL = int(cfg.get('ctxl', 0)); CHL = int(cfg.get('ctxh', -1)); HIST = int(cfg.get('hist', 512))
     BF16 = bool(int(cfg.get('bf16', 0)))
     if int(cfg.get('tf32', 0)): torch.backends.cuda.matmul.allow_tf32 = True; torch.backends.cudnn.allow_tf32 = True; torch.set_float32_matmul_precision('high')   # tf32=1: 行列積を TF32 で (出力層など)

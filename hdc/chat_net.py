@@ -18,7 +18,7 @@ def tok_path():
 
 def load(path):
     ck = torch.load(path, map_location='cpu'); cfg = ck['cfg']; st = ck['state']
-    X.DEV = torch.device('cpu'); X.SPARSE = False; X.CV = bool(int(cfg.get('ctxv', 0))); X.CL = int(cfg.get('ctxl', 0)); X.CHL = int(cfg.get('ctxh', -1)); X.BF16 = bool(int(cfg.get('bf16', 0)))
+    X.DEV = torch.device('cpu'); X.SPARSE = False; X.CV = bool(int(cfg.get('ctxv', 0))); X.CL = int(cfg.get('ctxl', 0)); X.CHL = int(cfg.get('ctxh', -1)); X.BF16 = bool(int(cfg.get('bf16', 0))); X.VFAC = int(cfg.get('vfac', 0)); X.VFULL = bool(int(cfg.get('vfull', 1)))
     X.MC = cfg.get('mc', X.MC); X.W2 = cfg.get('w2', X.W2); c = cfg.get('c', 8)
     net = X.Net(cfg.get('d', 128), c, cfg['L'], cfg.get('n', 256), cfg.get('kk', 4), cfg.get('k', 4), list(cfg.get('feats', [])), st['rar'].numpy())
     net.load_state_dict(st); net.eval(); return net, cfg

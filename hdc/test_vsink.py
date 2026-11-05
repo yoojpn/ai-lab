@@ -24,3 +24,11 @@ for vs in (False, True):
 print('loss', res[0][0], res[1][0])
 for l in range(L): print('Val', l, 'max diff', (res[0][1][l] - res[1][1][l]).abs().max().item())
 print('sink 残り(0であるべき)', [b.abs().max().item() for b in res[1][2]])
+
+# vfac: 勾配が共有部品に届く・形が合う・R=1,vfull=0 の初期出力の大きさ
+X.VFAC = 4; X.VFULL = False; X.Net.VSINK = False
+net = X.Net(d, c, L, n, kk, k, [1, 2, 3], rar); assert len(net.Val) == 0
+pos = torch.arange(100, 164); inp = X.make_inputs_t(T, pos, ds[pos], [1, 2, 3], offs8, o1, offs2)
+a, g = net.cache(inp); h = net.hidden(inp, net.ctxv(inp, a)); loss = ((h @ net.U.t()).log_softmax(1)[torch.arange(64), T[pos]]).mean().neg(); loss.backward()
+print('vfac 損失', loss.item(), '| VA 勾配ノルム', [p.grad.norm().item() for p in net.VA], '| 全行表あり 併用も可')
+X.VFULL = True; net2 = X.Net(d, c, L, n, kk, k, [1, 2, 3], rar); print('併用の Val 数', len(net2.Val))
