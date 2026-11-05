@@ -25,6 +25,7 @@ def _kq_eager(ew, vv, e0, p0, p1):
 BF16 = False
 CV = False
 CHL = -1             # ctxh=l: l 層の後で 中間表現どうしで Attention (鍵と値が その位置の中間表現)。 -1 で なし
+HNG = 0             # hng=B: 直前2語・3語のハッシュ (2^B 行の表) で行を引いて x に足す (語の組み合わせを表引きの段階で作る)。 0 で なし
 VFAC = 0            # vfac=R: Val の行 (ia,ib) を R 個の 共有部品の積の和 VA[ia]*VB[ib] で作る (行どうしで部品を共有)。 0 で なし
 VFULL = True        # vfull=0: 全行の表 Val をやめて 共有部品だけにする (vfac>0 のとき)
 CL = 0              # ctxl=N: 下の N 層で、 その層の中間表現から 文脈の語を引き直す (Attention を重ねる)
@@ -49,6 +50,11 @@ class RowGather(torch.autograd.Function):
 class Net(nn.Module):
     VSINK = False                                    # main() が cfg vsink=1 のとき True にして net.Vsink を用意する
 
+    def _hn(s, inp):
+        c_ = inp['ctx']; a, b, c3 = c_[:, 0], c_[:, 1], c_[:, 2]; HT = 1 << HNG
+        h2 = (a * 1000003 + b * 7919 + 17) % HT; h3 = ((a * 1000003 + b * 7919) * 31 + c3 * 104729 + 5) % HT
+        s._hrows = torch.cat([h2, h3]); return s.H(h2) + s.H(h3)
+
     def _val(s, l, rows):
         o = 0
         if len(s.Val): o = RowGather.apply(s.Val[l].weight, rows, s.Vsink[l]) if s.VSINK else s.Val[l](rows)
@@ -69,6 +75,7 @@ class Net(nn.Module):
             f_ = (0.02 / VFAC ** 0.5) ** 0.5            # R 個の積の和の標準偏差が 0.02 になる大きさ
             s.VA = nn.ParameterList([nn.Parameter(torch.randn(VFAC, n, d) * f_) for _ in range(L)]); s.VB = nn.ParameterList([nn.Parameter(torch.randn(VFAC, n, d) * f_) for _ in range(L)])
         s._rows = [None] * L
+        if HNG: s.H = nn.Embedding(1 << HNG, d, sparse=SPARSE); nn.init.normal_(s.H.weight, 0, 0.05); s._hrows = None
         s.tau = nn.Parameter(torch.ones(max(L, 1)))
         s.U = nn.Parameter(torch.randn(V, d) * 0.05)
         s.register_buffer('rar', torch.tensor(rar, dtype=torch.float32))
@@ -83,6 +90,7 @@ class Net(nn.Module):
 
     def sparse_params(s):
         out = [s.E.weight] + [v.weight for v in s.Val]
+        if HNG: out.append(s.H.weight)
         if 3 in s.feats: out.append(s.Ek.weight)
         return out
 
@@ -95,6 +103,7 @@ class Net(nn.Module):
 
     def hidden(s, inp, cv=None):
         x = (s.E(inp['ctx']) * s.P[None]).sum(1)
+        if HNG: x = x + s._hn(inp)
         if cv is not None: x = x + s.Gc[None] * cv
         if 1 in s.feats:
             ids1 = inp['f1_ids']; m1 = inp['f1_m']; w1 = m1 / m1.sum(2, keepdim=True).clamp_min(1.0)   # 重みつきの平均を 1 命令で (embedding_bag)
@@ -145,6 +154,7 @@ class Net(nn.Module):
 
     def _base(s, inp, cv=None):
         x = (s.E(inp['ctx']) * s.P[None]).sum(1)
+        if HNG: x = x + s._hn(inp)
         if cv is not None: x = x + s.Gc[None] * cv
         if 1 in s.feats:
             ids1 = inp['f1_ids']; m1 = inp['f1_m']; w1 = m1 / m1.sum(2, keepdim=True).clamp_min(1.0)
@@ -310,7 +320,8 @@ def main(cfg):
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
     MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2); NS = cfg.get('ns', NS); K2 = cfg.get('k2', K2)
-    global KQF, BF16, CV, CL, CHL, VFAC, VFULL
+    global KQF, BF16, CV, CL, CHL, VFAC, VFULL, HNG
+    HNG = int(cfg.get('hng', 0))
     VFAC = int(cfg.get('vfac', 0)); VFULL = bool(int(cfg.get('vfull', 1)))
     CV = bool(int(cfg.get('ctxv', 0))); CL = int(cfg.get('ctxl', 0)); CHL = int(cfg.get('ctxh', -1)); HIST = int(cfg.get('hist', 512))
     BF16 = bool(int(cfg.get('bf16', 0)))
@@ -338,6 +349,7 @@ def main(cfg):
     lg('L=%d feats=%s B=%d 学習語 %d 歩数 %d パラメータ %.1fM 窓: 部品2=%d 部品3=%d' % (L, feats, B, len(pos), steps, npar / 1e6, W2, MC))
     use_graph = bool(fast and DEV.type == 'cuda' and int(cfg.get('graph', 1)))
     rowsrc = {id(v_.weight): (lambda l_=l_: net._rows[l_]) for l_, v_ in enumerate(net.Val)} if int(cfg.get('rowwise', 1)) else {}
+    if HNG and rowsrc is not None and int(cfg.get('rowwise', 1)): rowsrc[id(net.H.weight)] = (lambda: net._hrows)
     sinks = {}
     if int(cfg.get('vsink', 0)) and fast and rowsrc:         # Val の密な勾配 (毎歩 全体の 0 埋め・足し算) をやめ、 触った行だけ足し込む
         Net.VSINK = True; net.Vsink = [torch.zeros_like(v_.weight) for v_ in net.Val]; sinks = {id(v_.weight): net.Vsink[l_] for l_, v_ in enumerate(net.Val)}

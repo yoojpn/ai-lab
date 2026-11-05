@@ -32,3 +32,12 @@ pos = torch.arange(100, 164); inp = X.make_inputs_t(T, pos, ds[pos], [1, 2, 3], 
 a, g = net.cache(inp); h = net.hidden(inp, net.ctxv(inp, a)); loss = ((h @ net.U.t()).log_softmax(1)[torch.arange(64), T[pos]]).mean().neg(); loss.backward()
 print('vfac 損失', loss.item(), '| VA 勾配ノルム', [p.grad.norm().item() for p in net.VA], '| 全行表あり 併用も可')
 X.VFULL = True; net2 = X.Net(d, c, L, n, kk, k, [1, 2, 3], rar); print('併用の Val 数', len(net2.Val))
+
+# hng: 表が引かれ、勾配が届き、LazyAdam の rowsrc で更新できる
+X.HNG = 10; X.VFAC = 0; X.VFULL = True
+net3 = X.Net(d, c, L, n, kk, k, [1, 2, 3], rar); net3.H.weight.requires_grad_(True)
+rs = {id(v.weight): (lambda l=l: net3._rows[l]) for l, v in enumerate(net3.Val)}; rs[id(net3.H.weight)] = (lambda: net3._hrows)
+o3 = X.LazyAdam(net3.sparse_params(), lr=1e-2, rowsrc=rs); w0 = net3.H.weight.detach().clone()
+inp = X.make_inputs_t(T, pos, ds[pos], [1, 2, 3], offs8, o1, offs2); a, g = net3.cache(inp); h = net3.hidden(inp, net3.ctxv(inp, a))
+l3 = ((h @ net3.U.t()).log_softmax(1)[torch.arange(64), T[pos]]).mean().neg(); o3.zero_grad(); l3.backward(); o3.step()
+ch = (net3.H.weight.detach() != w0).any(1).sum().item(); print('hng 損失', l3.item(), '更新された行', ch, '(引いた行 最大', len(set(net3._hrows.tolist())), ')')
