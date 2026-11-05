@@ -25,6 +25,9 @@ def _kq_eager(ew, vv, e0, p0, p1):
 BF16 = False
 CV = False
 CHL = -1             # ctxh=l: l 層の後で 中間表現どうしで Attention (鍵と値が その位置の中間表現)。 -1 で なし
+TIE = False         # tie=1: 出力行列 U を 語ベクトル E と共有する
+VINIT = 0.02        # vinit=x: Val 表の初期の大きさ
+LRF = 0.1           # lrfloor=x: 学習率の下限 (線形減衰の終点)。 0 なら 0 まで下げる
 BAL = 0.0           # bal=a: ルーティングの偏りを減らす補助損失 (Switch 型: 選ばれた割合 × 平均確率) の係数。 0 で なし
 HNG = 0             # hng=B: 直前2語・3語のハッシュ (2^B 行の表) で行を引いて x に足す (語の組み合わせを表引きの段階で作る)。 0 で なし
 VFAC = 0            # vfac=R: Val の行 (ia,ib) を R 個の 共有部品の積の和 VA[ia]*VB[ib] で作る (行どうしで部品を共有)。 0 で なし
@@ -51,6 +54,9 @@ class RowGather(torch.autograd.Function):
 class Net(nn.Module):
     VSINK = False                                    # main() が cfg vsink=1 のとき True にして net.Vsink を用意する
 
+    def _U(s):
+        return s.E.weight if TIE else s.U
+
     def _hn(s, inp):
         c_ = inp['ctx']; a, b, c3 = c_[:, 0], c_[:, 1], c_[:, 2]; HT = 1 << HNG
         h2 = (a * 1000003 + b * 7919 + 17) % HT; h3 = ((a * 1000003 + b * 7919) * 31 + c3 * 104729 + 5) % HT
@@ -71,7 +77,7 @@ class Net(nn.Module):
         s.K1 = nn.ParameterList([nn.Parameter(torch.randn(n, d // 2) * 0.5) for _ in range(L)])
         s.K2 = nn.ParameterList([nn.Parameter(torch.randn(n, d // 2) * 0.5) for _ in range(L)])
         s.Val = nn.ModuleList([nn.Embedding(n * n, d, sparse=SPARSE) for _ in range(L)] if (VFULL or not VFAC) else [])
-        for v in s.Val: nn.init.normal_(v.weight, 0, 0.02)
+        for v in s.Val: nn.init.normal_(v.weight, 0, VINIT)
         if VFAC:
             f_ = (0.02 / VFAC ** 0.5) ** 0.5            # R 個の積の和の標準偏差が 0.02 になる大きさ
             s.VA = nn.ParameterList([nn.Parameter(torch.randn(VFAC, n, d) * f_) for _ in range(L)]); s.VB = nn.ParameterList([nn.Parameter(torch.randn(VFAC, n, d) * f_) for _ in range(L)])
@@ -205,7 +211,7 @@ class Net(nn.Module):
         xq = xs[:, H:] + s.Gh[None, None] * torch.bmm(A, r)
         xq = xq.reshape(nb * M, -1)
         for l in range(CHL + 1, s.L): xq = s._layer(l, xq)
-        lp = F.log_softmax(F.linear(s.rms(xq), s.U), dim=1).gather(1, y[:, None])[:, 0]
+        lp = F.log_softmax(F.linear(s.rms(xq), s._U()), dim=1).gather(1, y[:, None])[:, 0]
         pc = (a_c[:, H:] * (Tw[:, H:] == y.view(nb, M)[..., None]).float()).sum(2).reshape(-1); g = g_c[:, H:].reshape(-1)
         return torch.log((1 - g) * lp.exp() + g * pc + 1e-12)
 
@@ -227,7 +233,7 @@ class Net(nn.Module):
 
     def logp_band(s, inp, X, y, ds_loc, M):
         a, g, cv, Tw = s.band(X, ds_loc, M); nb = X.shape[0]
-        lp = F.log_softmax(F.linear(s.hidden(inp, None if cv is None else cv.reshape(nb * M, -1)), s.U), dim=1).gather(1, y[:, None])[:, 0]
+        lp = F.log_softmax(F.linear(s.hidden(inp, None if cv is None else cv.reshape(nb * M, -1)), s._U()), dim=1).gather(1, y[:, None])[:, 0]
         pc = (a * (Tw == y.view(nb, M)[..., None]).float()).sum(2).reshape(-1)
         return torch.log((1 - g.reshape(-1)) * lp.exp() + g.reshape(-1) * pc + 1e-12)
 
@@ -235,7 +241,7 @@ class Net(nn.Module):
         if 3 in s.feats:
             a, g = s.cache(inp); cv = s.ctxv(inp, a)
         else: cv = None
-        lp = F.log_softmax(F.linear(s.hidden(inp, cv), s.U), dim=1).gather(1, y[:, None])[:, 0]
+        lp = F.log_softmax(F.linear(s.hidden(inp, cv), s._U()), dim=1).gather(1, y[:, None])[:, 0]
         if 3 not in s.feats: return lp
         pc = (a * (inp['f3_val'] == y[:, None]).float()).sum(1)
         return torch.log((1 - g) * lp.exp() + g * pc + 1e-12)
@@ -244,7 +250,7 @@ class Net(nn.Module):
         if 3 in s.feats:
             a, g = s.cache(inp); cv = s.ctxv(inp, a)
         else: cv = None
-        pm = F.softmax(F.linear(s.hidden(inp, cv), s.U), dim=1)
+        pm = F.softmax(F.linear(s.hidden(inp, cv), s._U()), dim=1)
         if 3 not in s.feats: return pm
         pcd = torch.zeros_like(pm).scatter_add_(1, inp['f3_val'], a)
         return (1 - g)[:, None] * pm + g[:, None] * pcd
@@ -329,7 +335,8 @@ def main(cfg):
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
     MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2); NS = cfg.get('ns', NS); K2 = cfg.get('k2', K2)
-    global KQF, BF16, CV, CL, CHL, VFAC, VFULL, HNG, BAL
+    global KQF, BF16, CV, CL, CHL, VFAC, VFULL, HNG, BAL, TIE, VINIT, LRF
+    TIE = bool(int(cfg.get('tie', 0))); VINIT = float(cfg.get('vinit', 0.02)); LRF = float(cfg.get('lrfloor', 0.1))
     BAL = float(cfg.get('bal', 0.0))
     HNG = int(cfg.get('hng', 0))
     VFAC = int(cfg.get('vfac', 0)); VFULL = bool(int(cfg.get('vfull', 1)))
@@ -462,7 +469,7 @@ def main(cfg):
         for r in rows_: lg('PROF_KERNEL %5.1f%% %8.2f ミリ秒/歩 x%d %s' % (100 * sd_(r) / tt_, sd_(r) / 1000 / 10, r.count // 10, r.key[:90]))
         lg('PROF_TOTAL GPU の実計算 %.2f ミリ秒/歩' % (tt_ / 1000 / 10)); return
     for st in range(steps):
-        f = min(1.0, (st + 1) / warm) * max(0.1, 1 - st / steps)
+        f = min(1.0, (st + 1) / warm) * max(LRF, 1 - st / steps)
         if use_graph:
             opt_d.param_groups[0]['lr'].fill_(lr * f); opt_s.param_groups[0]['lr'].fill_(lrs * f)
             pos_buf.copy_(pos_t[st * B:(st + 1) * B])

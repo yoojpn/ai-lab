@@ -46,3 +46,7 @@ ch = (net3.H.weight.detach() != w0).any(1).sum().item(); print('hng 損失', l3.
 X.BAL = 0.01; X.HNG = 0; net4 = X.Net(d, c, L, n, kk, k, [1, 2, 3], rar); net4._aux = 0.0
 inp = X.make_inputs_t(T, pos, ds[pos], [1, 2, 3], offs8, o1, offs2); a, g = net4.cache(inp); h = net4.hidden(inp, net4.ctxv(inp, a))
 aux = net4._aux; aux.backward(); print('bal 補助損失 %.3f (一様なら %d)' % (aux.item(), 2 * L), '| K1 勾配ノルム', net4.K1[0].grad.norm().item()); X.BAL = 0.0
+
+# tie: U を E と共有しても 損失が出て E に 出力側の勾配が届く
+X.TIE = True; net5 = X.Net(d, c, L, n, kk, k, [1, 2, 3], rar); a, g = net5.cache(inp); h = net5.hidden(inp, net5.ctxv(inp, a))
+l5 = ((h @ net5._U().t()).log_softmax(1)[torch.arange(64), T[pos]]).mean().neg(); l5.backward(); print('tie 損失 %.3f E 勾配の非零行 %d' % (l5.item(), (net5.E.weight.grad.abs().sum(1) > 0).sum().item())); X.TIE = False
