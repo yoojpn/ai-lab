@@ -25,6 +25,10 @@ def _kq_eager(ew, vv, e0, p0, p1):
 BF16 = False
 CV = False
 CHL = -1             # ctxh=l: l 層の後で 中間表現どうしで Attention (鍵と値が その位置の中間表現)。 -1 で なし
+QP = False          # qproj=1: ルーティングの問い合わせに 学習する d×d の射影 (単位行列で初期化。 小さな密な行列 ※規則)
+LSC = 1.0           # lsc=x: 各層の出力に 学習するスカラー倍 (初期値 x)
+PPOS = False        # ppos=1: 位置ごとに別の語ベクトル表 (c×V 行) を足す
+HSK = False         # hsk=1: スキップグラム (-1と-3, -2と-4) のハッシュ表引きも足す (hng>0 が必要)
 TIE = False         # tie=1: 出力行列 U を 語ベクトル E と共有する
 VINIT = 0.02        # vinit=x: Val 表の初期の大きさ
 LRF = 0.1           # lrfloor=x: 学習率の下限 (線形減衰の終点)。 0 なら 0 まで下げる
@@ -60,7 +64,13 @@ class Net(nn.Module):
     def _hn(s, inp):
         c_ = inp['ctx']; a, b, c3 = c_[:, 0], c_[:, 1], c_[:, 2]; HT = 1 << HNG
         h2 = (a * 1000003 + b * 7919 + 17) % HT; h3 = ((a * 1000003 + b * 7919) * 31 + c3 * 104729 + 5) % HT
-        s._hrows = torch.cat([h2, h3]); return s.H(h2) + s.H(h3)
+        hs = [h2, h3]
+        if HSK: d4 = c_[:, 3]; hs += [(a * 1000003 + c3 * 7919 + 101) % HT, (b * 1000003 + d4 * 7919 + 211) % HT]
+        s._hrows = torch.cat(hs); return sum(s.H(h_) for h_ in hs)
+
+    def _pp(s, inp):
+        r = inp['ctx'] + (torch.arange(inp['ctx'].shape[1], device=inp['ctx'].device) * V)[None]
+        s._pprows = r.reshape(-1); return s.Ep(r).sum(1)
 
     def _val(s, l, rows):
         o = 0
@@ -83,6 +93,9 @@ class Net(nn.Module):
             s.VA = nn.ParameterList([nn.Parameter(torch.randn(VFAC, n, d) * f_) for _ in range(L)]); s.VB = nn.ParameterList([nn.Parameter(torch.randn(VFAC, n, d) * f_) for _ in range(L)])
         s._rows = [None] * L; s._aux = 0.0
         if HNG: s.H = nn.Embedding(1 << HNG, d, sparse=SPARSE); nn.init.normal_(s.H.weight, 0, 0.05); s._hrows = None
+        if QP: s.Wqp = nn.ParameterList([nn.Parameter(torch.eye(d)) for _ in range(L)])
+        if LSC != 1.0: s.lsc = nn.Parameter(torch.full((max(L, 1),), LSC))
+        if PPOS: s.Ep = nn.Embedding(c * V, d, sparse=SPARSE); nn.init.normal_(s.Ep.weight, 0, 0.05); s._pprows = None
         s.tau = nn.Parameter(torch.ones(max(L, 1)))
         s.U = nn.Parameter(torch.randn(V, d) * 0.05)
         s.register_buffer('rar', torch.tensor(rar, dtype=torch.float32))
@@ -98,6 +111,7 @@ class Net(nn.Module):
     def sparse_params(s):
         out = [s.E.weight] + [v.weight for v in s.Val]
         if HNG: out.append(s.H.weight)
+        if PPOS: out.append(s.Ep.weight)
         if 3 in s.feats: out.append(s.Ek.weight)
         return out
 
@@ -111,6 +125,7 @@ class Net(nn.Module):
     def hidden(s, inp, cv=None):
         x = (s.E(inp['ctx']) * s.P[None]).sum(1)
         if HNG: x = x + s._hn(inp)
+        if PPOS: x = x + s._pp(inp)
         if cv is not None: x = x + s.Gc[None] * cv
         if 1 in s.feats:
             ids1 = inp['f1_ids']; m1 = inp['f1_m']; w1 = m1 / m1.sum(2, keepdim=True).clamp_min(1.0)   # 重みつきの平均を 1 命令で (embedding_bag)
@@ -129,7 +144,9 @@ class Net(nn.Module):
                 sc_ = s.thl[l] * (kq @ qh[:, :, None])[:, :, 0].float(); v_ = inp['f3_v']
                 al = F.softmax(sc_.masked_fill(~v_, -1e9), dim=1) * v_.any(1)[:, None]
                 x = x + s.Gl[l][None] * F.embedding_bag(inp['f3_val'], s.E.weight, per_sample_weights=al, mode='sum', sparse=s.E.sparse)
-            q = s.rms(x); q1, q2 = q[:, :h], q[:, h:]
+            q = s.rms(x)
+            q = q @ s.Wqp[l] if QP else q
+            q1, q2 = q[:, :h], q[:, h:]
             s1 = q1 @ s.K1[l].t() / math.sqrt(h); s2_ = q2 @ s.K2[l].t() / math.sqrt(h)
             v1, i1 = s1.topk(kk, dim=1); v2, i2 = s2_.topk(kk, dim=1)
             if BAL:                                          # 鍵の使われ方を ならす (選ばれた割合 f と 平均確率 P の積)
@@ -140,7 +157,7 @@ class Net(nn.Module):
             sc, ix = comb.topk(k, dim=1)
             a = F.softmax(sc / s.tau[l].abs().clamp_min(0.05), dim=1)
             ia = i1.gather(1, ix // kk); ib = i2.gather(1, ix % kk); rows = ia * n + ib; s._rows[l] = rows.flatten()
-            x = x + (a[:, :, None] * s._val(l, rows)).sum(1)
+            x = x + (a[:, :, None] * s._val(l, rows)).sum(1) * (s.lsc[l] if LSC != 1.0 else 1.0)
         return s.rms(x)
 
     def cache(s, inp):
@@ -166,6 +183,7 @@ class Net(nn.Module):
     def _base(s, inp, cv=None):
         x = (s.E(inp['ctx']) * s.P[None]).sum(1)
         if HNG: x = x + s._hn(inp)
+        if PPOS: x = x + s._pp(inp)
         if cv is not None: x = x + s.Gc[None] * cv
         if 1 in s.feats:
             ids1 = inp['f1_ids']; m1 = inp['f1_m']; w1 = m1 / m1.sum(2, keepdim=True).clamp_min(1.0)
@@ -181,7 +199,9 @@ class Net(nn.Module):
 
     def _layer(s, l, x):
         n, kk, k, h = s.n, s.kk, s.k, s.d // 2
-        q = s.rms(x); q1, q2 = q[:, :h], q[:, h:]
+        q = s.rms(x)
+        q = q @ s.Wqp[l] if QP else q
+        q1, q2 = q[:, :h], q[:, h:]
         s1 = q1 @ s.K1[l].t() / math.sqrt(h); s2_ = q2 @ s.K2[l].t() / math.sqrt(h)
         v1, i1 = s1.topk(kk, dim=1); v2, i2 = s2_.topk(kk, dim=1)
         if BAL:                                          # 鍵の使われ方を ならす (選ばれた割合 f と 平均確率 P の積)
@@ -192,7 +212,7 @@ class Net(nn.Module):
         sc, ix = comb.topk(k, dim=1)
         a = F.softmax(sc / s.tau[l].abs().clamp_min(0.05), dim=1)
         ia = i1.gather(1, ix // kk); ib = i2.gather(1, ix % kk); rows = ia * n + ib; s._rows[l] = rows.flatten()
-        return x + (a[:, :, None] * s._val(l, rows)).sum(1)
+        return x + (a[:, :, None] * s._val(l, rows)).sum(1) * (s.lsc[l] if LSC != 1.0 else 1.0)
 
     def logp_band_h(s, inp, X, y, ds_all, M, H):
         """ctxh: 連続した列で、 履歴 H 位置 + 予測 M 位置の中間表現を作り、 CHL 層の後で 予測位置が 直前 H 位置の中間表現へ Attention する。
@@ -335,7 +355,8 @@ def main(cfg):
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
     MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2); NS = cfg.get('ns', NS); K2 = cfg.get('k2', K2)
-    global KQF, BF16, CV, CL, CHL, VFAC, VFULL, HNG, BAL, TIE, VINIT, LRF
+    global KQF, BF16, CV, CL, CHL, VFAC, VFULL, HNG, BAL, TIE, VINIT, LRF, QP, LSC, PPOS, HSK
+    QP = bool(int(cfg.get('qproj', 0))); LSC = float(cfg.get('lsc', 1.0)); PPOS = bool(int(cfg.get('ppos', 0))); HSK = bool(int(cfg.get('hsk', 0)))
     TIE = bool(int(cfg.get('tie', 0))); VINIT = float(cfg.get('vinit', 0.02)); LRF = float(cfg.get('lrfloor', 0.1))
     BAL = float(cfg.get('bal', 0.0))
     HNG = int(cfg.get('hng', 0))
@@ -367,6 +388,7 @@ def main(cfg):
     use_graph = bool(fast and DEV.type == 'cuda' and int(cfg.get('graph', 1)))
     rowsrc = {id(v_.weight): (lambda l_=l_: net._rows[l_]) for l_, v_ in enumerate(net.Val)} if int(cfg.get('rowwise', 1)) else {}
     if HNG and rowsrc is not None and int(cfg.get('rowwise', 1)): rowsrc[id(net.H.weight)] = (lambda: net._hrows)
+    if PPOS and rowsrc is not None and int(cfg.get('rowwise', 1)): rowsrc[id(net.Ep.weight)] = (lambda: net._pprows)
     sinks = {}
     if int(cfg.get('vsink', 0)) and fast and rowsrc:         # Val の密な勾配 (毎歩 全体の 0 埋め・足し算) をやめ、 触った行だけ足し込む
         Net.VSINK = True; net.Vsink = [torch.zeros_like(v_.weight) for v_ in net.Val]; sinks = {id(v_.weight): net.Vsink[l_] for l_, v_ in enumerate(net.Val)}

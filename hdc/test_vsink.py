@@ -50,3 +50,12 @@ aux = net4._aux; aux.backward(); print('bal 補助損失 %.3f (一様なら %d)'
 # tie: U を E と共有しても 損失が出て E に 出力側の勾配が届く
 X.TIE = True; net5 = X.Net(d, c, L, n, kk, k, [1, 2, 3], rar); a, g = net5.cache(inp); h = net5.hidden(inp, net5.ctxv(inp, a))
 l5 = ((h @ net5._U().t()).log_softmax(1)[torch.arange(64), T[pos]]).mean().neg(); l5.backward(); print('tie 損失 %.3f E 勾配の非零行 %d' % (l5.item(), (net5.E.weight.grad.abs().sum(1) > 0).sum().item())); X.TIE = False
+
+# qproj / lsc / ppos / hsk: 全部入りで 損失が出て、 各部品に勾配が届き、 行ごとの更新ができる
+X.QP = True; X.LSC = 2.0; X.PPOS = True; X.HNG = 10; X.HSK = True
+net6 = X.Net(d, c, L, n, kk, k, [1, 2, 3], rar); net6.H.weight.requires_grad_(True); net6.Ep.weight.requires_grad_(True)
+rs = {id(v.weight): (lambda l=l: net6._rows[l]) for l, v in enumerate(net6.Val)}; rs[id(net6.H.weight)] = (lambda: net6._hrows); rs[id(net6.Ep.weight)] = (lambda: net6._pprows)
+o6 = X.LazyAdam(net6.sparse_params(), lr=1e-2, rowsrc=rs); e0 = net6.Ep.weight.detach().clone(); h0 = net6.H.weight.detach().clone()
+a, g = net6.cache(inp); h = net6.hidden(inp, net6.ctxv(inp, a)); l6 = ((h @ net6.U.t()).log_softmax(1)[torch.arange(64), T[pos]]).mean().neg(); o6.zero_grad(); l6.backward(); o6.step()
+print('全部入り 損失 %.3f | Wqp勾配 %.4f lsc勾配 %.4f | Ep更新行 %d H更新行 %d (H引き %d行)' % (l6.item(), net6.Wqp[0].grad.norm().item(), net6.lsc.grad.norm().item(), (net6.Ep.weight.detach() != e0).any(1).sum().item(), (net6.H.weight.detach() != h0).any(1).sum().item(), len(set(net6._hrows.tolist()))))
+X.QP = False; X.LSC = 1.0; X.PPOS = False; X.HNG = 0; X.HSK = False
