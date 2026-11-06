@@ -392,6 +392,10 @@ def main(cfg):
     pos = np.arange(c, N); pos = pos[S[pos] != 0]; rng.shuffle(pos); steps = len(pos) // B
     if SEQB:
         starts = np.arange(c + (HIST + MC + 2 if CHL >= 0 else 0), N - SEQB, SEQB); rng.shuffle(starts); pos = (starts[:, None] + np.arange(SEQB)[None]).reshape(-1); steps = len(pos) // B
+    EP = int(cfg.get('ep', 1))                              # ep=k: 同じデータを k 回 (毎回 並べ替えて) 学習する
+    if EP > 1:
+        un_ = SEQB if SEQB else 1; blk_ = pos[:len(pos) // un_ * un_].reshape(-1, un_)
+        pos = np.concatenate([pos[:len(pos) // un_ * un_]] + [blk_[rng.permutation(len(blk_))].reshape(-1) for _ in range(EP - 1)]); steps = len(pos) // B
     fast = (DEV.type == 'cuda' and int(cfg.get('fast', 1)) == 1) or int(cfg.get('fast', 1)) == 2; SPARSE = not fast   # fast=2: CPU で速い経路の試験
     net = Net(d, c, L, n, kk, k, feats, rar).to(DEV); npar = sum(p.numel() for p in net.parameters())
     lg('L=%d feats=%s B=%d 学習語 %d 歩数 %d パラメータ %.1fM 窓: 部品2=%d 部品3=%d' % (L, feats, B, len(pos), steps, npar / 1e6, W2, MC))
