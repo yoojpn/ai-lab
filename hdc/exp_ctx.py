@@ -56,6 +56,7 @@ class RowGather(torch.autograd.Function):
 
 
 class Net(nn.Module):
+    cap = False                                      # 評価のとき 網の確信度 (エントロピーとキャッシュの門 g) を残す
     VSINK = False                                    # main() が cfg vsink=1 のとき True にして net.Vsink を用意する
 
     def _U(s):
@@ -261,7 +262,8 @@ class Net(nn.Module):
         if 3 in s.feats:
             a, g = s.cache(inp); cv = s.ctxv(inp, a)
         else: cv = None
-        lp = F.log_softmax(F.linear(s.hidden(inp, cv), s._U()), dim=1).gather(1, y[:, None])[:, 0]
+        ls = F.log_softmax(F.linear(s.hidden(inp, cv), s._U()), dim=1); lp = ls.gather(1, y[:, None])[:, 0]
+        if s.cap: s._ent = -(ls.exp() * ls).sum(1) / math.log(2); s._g = g if 3 in s.feats else torch.zeros_like(lp)
         if 3 not in s.feats: return lp
         pc = (a * (inp['f3_val'] == y[:, None]).float()).sum(1)
         return torch.log((1 - g) * lp.exp() + g * pc + 1e-12)
@@ -434,16 +436,17 @@ def main(cfg):
                 out[a:a + nb_] = (lp / math.log(2)).view(nb_, SEQB).cpu().numpy()
         net.train(); return out
 
+    ENT = {}
     def nn_logp(T, p, ds, bs=1024, starts=None, D=None):
         if CHL >= 0 and starts is not None:
             full = nn_logp_blocks(T, D, starts).reshape(-1); Pall = (starts[:, None] + np.arange(SEQB)[None]).reshape(-1)
             u, iu = np.unique(Pall, return_index=True); return full[iu[np.searchsorted(u, p)]]
-        out = np.zeros(len(p)); net.eval()
+        out = np.zeros(len(p)); net.eval(); net.cap = True; en = np.zeros(len(p)); gg = np.zeros(len(p))
         with torch.no_grad():
             for a in range(0, len(p), bs):
                 pp = p[a:a + bs]; inp = make_inputs(T, pp, ds[a:a + bs], feats, offs8, o1, offs2); y = torch.from_numpy(T[pp]).to(DEV)
-                out[a:a + bs] = (net.logp(inp, y) / math.log(2)).cpu().numpy()
-        net.train(); return out
+                out[a:a + bs] = (net.logp(inp, y) / math.log(2)).cpu().numpy(); en[a:a + bs] = net._ent.float().cpu().numpy(); gg[a:a + bs] = net._g.float().cpu().numpy()
+        net.cap = False; ENT['ent'] = en; ENT['g'] = gg; net.train(); return out
 
     def load_split(sp_):
         T = np.fromfile('%s/%s.bin' % (W, sp_), dtype=np.uint16).astype(np.int64); D = np.load('%s/%s_docs.npy' % (W, sp_)); return T, D
@@ -550,7 +553,7 @@ def main(cfg):
     parts = {}
     for sp_ in ('val', 'test'):
         e_ = ev[sp_]; T = e_['T']; p = e_['p']; lp, hi = M.logprob_at(T.astype(np.uint16), p, return_hi=True)
-        parts[sp_] = dict(ng=2.0 ** lp, hi=hi, nn=2.0 ** nn_logp(T, p, e_['ds'], starts=e_.get('starts'), D=e_['D']), uni=pu[T[p]], depth=p - e_['ds'], nmain=e_['nmain'])
+        parts[sp_] = dict(ng=2.0 ** lp, hi=hi, nn=2.0 ** nn_logp(T, p, e_['ds'], starts=e_.get('starts'), D=e_['D']), uni=pu[T[p]], depth=p - e_['ds'], nmain=e_['nmain'], ent=ENT.get('ent'), gate=ENT.get('g'))
     G = np.r_[0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9]
     bins = lambda pl: np.clip((-np.log2(np.maximum(pl, 1e-12)) // 2).astype(int), 0, 7)
     bits = lambda P, m=None: float(-np.log2(P if m is None else P[m]).mean())
@@ -580,6 +583,20 @@ def main(cfg):
     g2o = fit_ok(pv1o[mv], V_['nn'][mv], hv_[mv]); pt2o = mixok(pt1o, T_['nn'], g2o, ht_)
     lg('合法な混合(重みは hi だけで決める): n-gram %.4f -> 較正 %.4f -> 混合 %.4f (上乗せ %.4f) | 長い文脈: 較正 %.4f -> 混合 %.4f (上乗せ %.4f) | 漏れありの上乗せ %.4f' % (
         bits(T_['ng'][mt]), bits(pt1o[mt]), bits(pt2o[mt]), bits(pt1o[mt]) - bits(pt2o[mt]), bits(pt1o[T_['nmain']:]), bits(pt2o[T_['nmain']:]), bits(pt1o[T_['nmain']:]) - bits(pt2o[T_['nmain']:]), bits(pt1[mt]) - bits(pt2[mt])))
+    # ---- 案26: 重みを hi に加えて 『網の確信度』 (予測前に分かる量) でも決める ----
+    try:
+        if V_['ent'] is not None and CHL < 0:
+            for nm_, key_, nq_ in (('エントロピー4分割', 'ent', 4), ('キャッシュの門3分割', 'gate', 3)):
+                qs_ = np.quantile(V_[key_][mv], np.linspace(0, 1, nq_ + 1)[1:-1]); eb_v = np.searchsorted(qs_, V_[key_]); eb_t = np.searchsorted(qs_, T_[key_])
+                g3 = np.zeros((6, nq_))
+                for b_ in range(1, 6):
+                    for e_i in range(nq_):
+                        mm = (hv_[mv] == b_) & (eb_v[mv] == e_i)
+                        g3[b_, e_i] = G[int(np.argmax([np.log2((1 - g) * pv1o[mv][mm] + g * V_['nn'][mv][mm]).mean() for g in G]))] if mm.sum() >= 200 else g2o[b_]
+                pt3 = (1 - g3[ht_, eb_t]) * pt1o + g3[ht_, eb_t] * T_['nn']
+                lg('結果: 案26 混合(重みを hi と %s で決める): %.4f (hi のみ %.4f, 差 %+.4f)' % (nm_, bits(pt3[mt]), bits(pt2o[mt]), bits(pt3[mt]) - bits(pt2o[mt])))
+    except Exception as e_26:
+        lg('結果: 案26は失敗: %r' % e_26)
     dep = T_['depth']; un = T_['hi'][mt] <= 2
     buckets = [(0, 8), (8, 64), (64, 512), (512, 10 ** 9)]; per = {}
     for lo, hi_ in buckets:
