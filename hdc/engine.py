@@ -145,13 +145,13 @@ class Model:
         """任意の位置 idx (配列) の 実際の語の log2 確率"""
         idx = np.asarray(idx, np.int64); nxt = tok_padded[idx].astype(np.uint64)
         P = (self.cont_p if (self.smooth == 'ad' or self.kn_base) else self.uni_p)[tok_padded[idx].astype(np.int64)]
-        hi = np.ones(len(idx), np.int8)
+        hi = np.ones(len(idx), np.int16)
         for n in self.orders:
             if n == 1:
                 continue
             h = ctx_hash(tok_padded, idx, n - 1, n); key = (h << np.uint64(16)) | nxt; t = self.t[n]
             i = np.minimum(np.searchsorted(t['k'], key), len(t['k']) - 1); cnt = np.where(t['k'][i] == key, t['c'][i].astype(np.float64), 0.0)
-            j = np.minimum(np.searchsorted(t['uc'], h), len(t['uc']) - 1); seen = t['uc'][j] == h; hi = np.where(seen, n, hi).astype(np.int8)
+            j = np.minimum(np.searchsorted(t['uc'], h), len(t['uc']) - 1); seen = t['uc'][j] == h; hi = np.where(seen, n, hi).astype(np.int16)
             N = np.where(seen, t['N'][j].astype(np.float64), 0.0); T = np.where(seen, t['T'][j].astype(np.float64), 0.0); X = np.where(seen, t['X'][j].astype(np.float64), 0.0)
             if self.smooth == 'ad':
                 Dn = self.D[n]; Tk = np.where(seen, t['K'][j].astype(np.float64), 0.0)
