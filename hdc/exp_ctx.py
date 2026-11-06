@@ -25,6 +25,7 @@ def _kq_eager(ew, vv, e0, p0, p1):
 BF16 = False
 CV = False
 CHL = -1             # ctxh=l: l 層の後で 中間表現どうしで Attention (鍵と値が その位置の中間表現)。 -1 で なし
+MLP = 0             # mlp=r: 各層に 小さな密な MLP (d→r→d) を足す ※規則外の診断 (組み合わせを作る力が 傾きを決めているか)
 QP = False          # qproj=1: ルーティングの問い合わせに 学習する d×d の射影 (単位行列で初期化。 小さな密な行列 ※規則)
 LSC = 1.0           # lsc=x: 各層の出力に 学習するスカラー倍 (初期値 x)
 PPOS = False        # ppos=1: 位置ごとに別の語ベクトル表 (c×V 行) を足す
@@ -58,6 +59,9 @@ class RowGather(torch.autograd.Function):
 class Net(nn.Module):
     cap = False                                      # 評価のとき 網の確信度 (エントロピーとキャッシュの門 g) を残す
     VSINK = False                                    # main() が cfg vsink=1 のとき True にして net.Vsink を用意する
+
+    def _mlp(s, l, x):
+        return F.relu(s.rms(x) @ s.M1[l]) @ s.M2[l]
 
     def _U(s):
         return s.E.weight if TIE else s.U
@@ -94,6 +98,7 @@ class Net(nn.Module):
             s.VA = nn.ParameterList([nn.Parameter(torch.randn(VFAC, n, d) * f_) for _ in range(L)]); s.VB = nn.ParameterList([nn.Parameter(torch.randn(VFAC, n, d) * f_) for _ in range(L)])
         s._rows = [None] * L; s._aux = 0.0
         if HNG: s.H = nn.Embedding(1 << HNG, d, sparse=SPARSE); nn.init.normal_(s.H.weight, 0, 0.05); s._hrows = None
+        if MLP: s.M1 = nn.ParameterList([nn.Parameter(torch.randn(d, MLP) / d ** 0.5) for _ in range(L)]); s.M2 = nn.ParameterList([nn.Parameter(torch.zeros(MLP, d)) for _ in range(L)])
         if QP: s.Wqp = nn.ParameterList([nn.Parameter(torch.eye(d)) for _ in range(L)])
         if LSC != 1.0: s.lsc = nn.Parameter(torch.full((max(L, 1),), LSC))
         if PPOS: s.Ep = nn.Embedding(c * V, d, sparse=SPARSE); nn.init.normal_(s.Ep.weight, 0, 0.05); s._pprows = None
@@ -159,6 +164,7 @@ class Net(nn.Module):
             a = F.softmax(sc / s.tau[l].abs().clamp_min(0.05), dim=1)
             ia = i1.gather(1, ix // kk); ib = i2.gather(1, ix % kk); rows = ia * n + ib; s._rows[l] = rows.flatten()
             x = x + (a[:, :, None] * s._val(l, rows)).sum(1) * (s.lsc[l] if LSC != 1.0 else 1.0)
+            if MLP: x = x + s._mlp(l, x)
         return s.rms(x)
 
     def cache(s, inp):
@@ -213,7 +219,8 @@ class Net(nn.Module):
         sc, ix = comb.topk(k, dim=1)
         a = F.softmax(sc / s.tau[l].abs().clamp_min(0.05), dim=1)
         ia = i1.gather(1, ix // kk); ib = i2.gather(1, ix % kk); rows = ia * n + ib; s._rows[l] = rows.flatten()
-        return x + (a[:, :, None] * s._val(l, rows)).sum(1) * (s.lsc[l] if LSC != 1.0 else 1.0)
+        x = x + (a[:, :, None] * s._val(l, rows)).sum(1) * (s.lsc[l] if LSC != 1.0 else 1.0)
+        return x + s._mlp(l, x) if MLP else x
 
     def logp_band_h(s, inp, X, y, ds_all, M, H):
         """ctxh: 連続した列で、 履歴 H 位置 + 予測 M 位置の中間表現を作り、 CHL 層の後で 予測位置が 直前 H 位置の中間表現へ Attention する。
@@ -357,7 +364,8 @@ def main(cfg):
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
     MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2); NS = cfg.get('ns', NS); K2 = cfg.get('k2', K2)
-    global KQF, BF16, CV, CL, CHL, VFAC, VFULL, HNG, BAL, TIE, VINIT, LRF, QP, LSC, PPOS, HSK
+    global KQF, BF16, CV, CL, CHL, VFAC, VFULL, HNG, BAL, TIE, VINIT, LRF, QP, LSC, PPOS, HSK, MLP
+    MLP = int(cfg.get('mlp', 0))
     QP = bool(int(cfg.get('qproj', 0))); LSC = float(cfg.get('lsc', 1.0)); PPOS = bool(int(cfg.get('ppos', 0))); HSK = bool(int(cfg.get('hsk', 0)))
     TIE = bool(int(cfg.get('tie', 0))); VINIT = float(cfg.get('vinit', 0.02)); LRF = float(cfg.get('lrfloor', 0.1))
     BAL = float(cfg.get('bal', 0.0))

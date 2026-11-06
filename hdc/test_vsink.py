@@ -59,3 +59,7 @@ o6 = X.LazyAdam(net6.sparse_params(), lr=1e-2, rowsrc=rs); e0 = net6.Ep.weight.d
 a, g = net6.cache(inp); h = net6.hidden(inp, net6.ctxv(inp, a)); l6 = ((h @ net6.U.t()).log_softmax(1)[torch.arange(64), T[pos]]).mean().neg(); o6.zero_grad(); l6.backward(); o6.step()
 print('全部入り 損失 %.3f | Wqp勾配 %.4f lsc勾配 %.4f | Ep更新行 %d H更新行 %d (H引き %d行)' % (l6.item(), net6.Wqp[0].grad.norm().item(), net6.lsc.grad.norm().item(), (net6.Ep.weight.detach() != e0).any(1).sum().item(), (net6.H.weight.detach() != h0).any(1).sum().item(), len(set(net6._hrows.tolist()))))
 X.QP = False; X.LSC = 1.0; X.PPOS = False; X.HNG = 0; X.HSK = False
+
+# mlp: 小さな密な MLP が 通り、 勾配が届く (M2 は 0 初期化なので 最初の損失は mlp なしと同じ)
+X.MLP = 16; net7 = X.Net(d, c, L, n, kk, k, [1, 2, 3], rar); a, g = net7.cache(inp); h = net7.hidden(inp, net7.ctxv(inp, a))
+l7 = ((h @ net7.U.t()).log_softmax(1)[torch.arange(64), T[pos]]).mean().neg(); l7.backward(); print('mlp 損失 %.3f M2勾配 %.4f' % (l7.item(), net7.M2[0].grad.norm().item())); X.MLP = 0
