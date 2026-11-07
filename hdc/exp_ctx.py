@@ -24,6 +24,7 @@ def _kq_eager(ew, vv, e0, p0, p1):
     return F.normalize(kq, dim=-1)
 BF16 = False
 CV = False
+LRESET = 0           # lreset=1: 再帰の状態を 文書の区切り (直前の語が 0) で 0 に戻す
 LREC = 0             # lrec=1: 履歴を含む列で 入力の直後に 線形再帰層 (Mamba 系の考え方: 入力で決まる減衰 a_t, s_t = a_t*s_(t-1) + u_t) を足す (ctxh=l と一緒に使う)
 CHL = -1             # ctxh=l: l 層の後で 中間表現どうしで Attention (鍵と値が その位置の中間表現)。 -1 で なし
 MLP = 0             # mlp=r: 各層に 小さな密な MLP (d→r→d) を足す ※規則外の診断 (組み合わせを作る力が 傾きを決めているか)
@@ -99,7 +100,7 @@ class Net(nn.Module):
         if VFAC:
             f_ = (0.02 / VFAC ** 0.5) ** 0.5            # R 個の積の和の標準偏差が 0.02 になる大きさ
             s.VA = nn.ParameterList([nn.Parameter(torch.randn(VFAC, n, d) * f_) for _ in range(L)]); s.VB = nn.ParameterList([nn.Parameter(torch.randn(VFAC, n, d) * f_) for _ in range(L)])
-        s._rows = [None] * L; s._aux = 0.0; s._o = [None] * L
+        s._rows = [None] * L; s._aux = 0.0; s._o = [None] * L; s._seq = None
         if HNG: s.H = nn.Embedding(1 << HNG, d, sparse=SPARSE); nn.init.normal_(s.H.weight, 0, 0.05); s._hrows = None
         if MLP: s.M1 = nn.ParameterList([nn.Parameter(torch.randn(d, MLP) / d ** 0.5) for _ in range(L)]); s.M2 = nn.ParameterList([nn.Parameter(torch.zeros(MLP, d)) for _ in range(L)])
         if SCH: s.thc = nn.Parameter(torch.tensor(0.2)); s.scw = nn.Parameter(torch.zeros(d)); s.scb = nn.Parameter(torch.tensor(-2.0))
@@ -148,6 +149,8 @@ class Net(nn.Module):
             ids = inp['f2_ids'].gather(1, ti)
             s2 = F.embedding_bag(ids, s.E.weight, per_sample_weights=w / (w.sum(1, keepdim=True) + 1e-6), mode='sum', sparse=s.E.sparse)
             x = x + s.G2[None] * s2
+        if LREC and s._seq is not None:                                              # lrec: 連続した列 (nb 本 × M 位置) では 入力の直後に 線形再帰を足す
+            nb_, M_ = s._seq; x = s._rec(x.view(nb_, M_, -1), reset=((inp['ctx'][:, 0] == 0).view(nb_, M_) if LRESET else None)).reshape(nb_ * M_, -1)
         n, kk, k, h = s.n, s.kk, s.k, s.d // 2
         for l in range(s.L):
             if l < CL and 3 in s.feats:                                              # 層ごとの Attention: 今の中間表現で 鍵 (直前2語から作った kq) を引き直し 文脈の語を足す
@@ -229,12 +232,13 @@ class Net(nn.Module):
         x = x + (a[:, :, None] * s._val(l, rows)).sum(1) * (s.lsc[l] if LSC != 1.0 else 1.0)
         return x + s._mlp(l, x) if MLP else x
 
-    def _rec(s, x, T=32):
+    def _rec(s, x, T=32, reset=None):
         """線形再帰: s_t = exp(la_t) s_(t-1) + u_t (la_t = -softplus(x_t Wa + b) を -0.5 以上に)。 T 位置ずつの累積和で 並列に計算し、 塊の間だけ順に回す"""
         r = s.rms(x).float(); la = -F.softplus(r @ s.Wra + s.bra).clamp(max=0.5); u = r @ s.Wru
+        if reset is not None: la = torch.where(reset[..., None], torch.full_like(la, -15.0), la)      # 文書の頭では 前の状態を ほぼ 0 にする
         st = torch.zeros_like(u[:, 0]); outs = []
         for i in range(0, x.shape[1], T):
-            cum = la[:, i:i + T].cumsum(1); y = torch.exp(cum) * (st[:, None] + (u[:, i:i + T] * torch.exp(-cum)).cumsum(1)); st = y[:, -1]; outs.append(y)
+            cum = la[:, i:i + T].cumsum(1); y = torch.exp(cum) * (st[:, None] + (u[:, i:i + T] * torch.exp(-cum).clamp(max=1e30)).cumsum(1)); st = y[:, -1]; outs.append(y)
         return x + (s.rms(torch.cat(outs, 1)) @ s.Wro).to(x.dtype)
 
     def logp_band_h(s, inp, X, y, ds_all, M, H):
@@ -297,7 +301,8 @@ class Net(nn.Module):
 
     def logp_band(s, inp, X, y, ds_loc, M):
         a, g, cv, Tw = s.band(X, ds_loc, M); nb = X.shape[0]
-        lp = F.log_softmax(F.linear(s.hidden(inp, None if cv is None else cv.reshape(nb * M, -1)), s._U()), dim=1).gather(1, y[:, None])[:, 0]
+        s._seq = (nb, M); hv = s.hidden(inp, None if cv is None else cv.reshape(nb * M, -1)); s._seq = None
+        lp = F.log_softmax(F.linear(hv, s._U()), dim=1).gather(1, y[:, None])[:, 0]
         pc = (a * (Tw == y.view(nb, M)[..., None]).float()).sum(2).reshape(-1)
         return torch.log((1 - g.reshape(-1)) * lp.exp() + g.reshape(-1) * pc + 1e-12)
 
@@ -400,14 +405,14 @@ def main(cfg):
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
     MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2); NS = cfg.get('ns', NS); K2 = cfg.get('k2', K2)
-    global AUXW, LREC, KQF, BF16, CV, CL, CHL, VFAC, VFULL, HNG, BAL, TIE, VINIT, LRF, QP, LSC, PPOS, HSK, MLP
+    global LRESET, AUXW, LREC, KQF, BF16, CV, CL, CHL, VFAC, VFULL, HNG, BAL, TIE, VINIT, LRF, QP, LSC, PPOS, HSK, MLP
     MLP = int(cfg.get('mlp', 0))
     QP = bool(int(cfg.get('qproj', 0))); LSC = float(cfg.get('lsc', 1.0)); PPOS = bool(int(cfg.get('ppos', 0))); HSK = bool(int(cfg.get('hsk', 0)))
     TIE = bool(int(cfg.get('tie', 0))); VINIT = float(cfg.get('vinit', 0.02)); LRF = float(cfg.get('lrfloor', 0.1))
     BAL = float(cfg.get('bal', 0.0)); AUXW = float(cfg.get('aux', 0.0))
     HNG = int(cfg.get('hng', 0))
     VFAC = int(cfg.get('vfac', 0)); VFULL = bool(int(cfg.get('vfull', 1)))
-    CV = bool(int(cfg.get('ctxv', 0))); CL = int(cfg.get('ctxl', 0)); CHL = int(cfg.get('ctxh', -1)); LREC = int(cfg.get('lrec', 0)); HIST = int(cfg.get('hist', 512))
+    CV = bool(int(cfg.get('ctxv', 0))); CL = int(cfg.get('ctxl', 0)); CHL = int(cfg.get('ctxh', -1)); LREC = int(cfg.get('lrec', 0)); LRESET = int(cfg.get('lreset', 0)); HIST = int(cfg.get('hist', 512))
     BF16 = bool(int(cfg.get('bf16', 0)))
     if int(cfg.get('tf32', 0)): torch.backends.cuda.matmul.allow_tf32 = True; torch.backends.cudnn.allow_tf32 = True; torch.set_float32_matmul_precision('high')   # tf32=1: 行列積を TF32 で (出力層など)
     if int(cfg.get('compile', 0)): KQF = torch.compile(_kq_eager)
