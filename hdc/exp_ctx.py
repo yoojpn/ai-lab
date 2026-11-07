@@ -24,6 +24,7 @@ def _kq_eager(ew, vv, e0, p0, p1):
     return F.normalize(kq, dim=-1)
 BF16 = False
 CV = False
+LREC = 0             # lrec=1: 履歴を含む列で 入力の直後に 線形再帰層 (Mamba 系の考え方: 入力で決まる減衰 a_t, s_t = a_t*s_(t-1) + u_t) を足す (ctxh=l と一緒に使う)
 CHL = -1             # ctxh=l: l 層の後で 中間表現どうしで Attention (鍵と値が その位置の中間表現)。 -1 で なし
 MLP = 0             # mlp=r: 各層に 小さな密な MLP (d→r→d) を足す ※規則外の診断 (組み合わせを作る力が 傾きを決めているか)
 SCH = 0             # sch=H: 最終層の隠れ状態の連続キャッシュ (Grave 型, 窓 H 語)。 鍵 = 過去の隠れ状態、 値 = その位置の語。 学習する
@@ -101,6 +102,7 @@ class Net(nn.Module):
         if HNG: s.H = nn.Embedding(1 << HNG, d, sparse=SPARSE); nn.init.normal_(s.H.weight, 0, 0.05); s._hrows = None
         if MLP: s.M1 = nn.ParameterList([nn.Parameter(torch.randn(d, MLP) / d ** 0.5) for _ in range(L)]); s.M2 = nn.ParameterList([nn.Parameter(torch.zeros(MLP, d)) for _ in range(L)])
         if SCH: s.thc = nn.Parameter(torch.tensor(0.2)); s.scw = nn.Parameter(torch.zeros(d)); s.scb = nn.Parameter(torch.tensor(-2.0))
+        if LREC: s.Wra = nn.Parameter(torch.randn(d, d) * 0.02); s.bra = nn.Parameter(torch.full((d,), -5.0)); s.Wru = nn.Parameter(torch.randn(d, d) * d ** -0.5); s.Wro = nn.Parameter(torch.zeros(d, d))
         if QP: s.Wqp = nn.ParameterList([nn.Parameter(torch.eye(d)) for _ in range(L)])
         if LSC != 1.0: s.lsc = nn.Parameter(torch.full((max(L, 1),), LSC))
         if PPOS: s.Ep = nn.Embedding(c * V, d, sparse=SPARSE); nn.init.normal_(s.Ep.weight, 0, 0.05); s._pprows = None
@@ -224,12 +226,21 @@ class Net(nn.Module):
         x = x + (a[:, :, None] * s._val(l, rows)).sum(1) * (s.lsc[l] if LSC != 1.0 else 1.0)
         return x + s._mlp(l, x) if MLP else x
 
+    def _rec(s, x, T=32):
+        """線形再帰: s_t = exp(la_t) s_(t-1) + u_t (la_t = -softplus(x_t Wa + b) を -0.5 以上に)。 T 位置ずつの累積和で 並列に計算し、 塊の間だけ順に回す"""
+        r = s.rms(x).float(); la = -F.softplus(r @ s.Wra + s.bra).clamp(max=0.5); u = r @ s.Wru
+        st = torch.zeros_like(u[:, 0]); outs = []
+        for i in range(0, x.shape[1], T):
+            cum = la[:, i:i + T].cumsum(1); y = torch.exp(cum) * (st[:, None] + (u[:, i:i + T] * torch.exp(-cum)).cumsum(1)); st = y[:, -1]; outs.append(y)
+        return x + (s.rms(torch.cat(outs, 1)) @ s.Wro).to(x.dtype)
+
     def logp_band_h(s, inp, X, y, ds_all, M, H):
         """ctxh: 連続した列で、 履歴 H 位置 + 予測 M 位置の中間表現を作り、 CHL 層の後で 予測位置が 直前 H 位置の中間表現へ Attention する。
         inp: 履歴+予測の全位置 (nb*(H+M)) の入力。 X: 長さ (H+M)+MC+2 の語の列。 ds_all: (nb,H+M) 各位置の文書の開始 (X の中の番号)。 y: 予測位置の語 (nb*M)"""
         nb = X.shape[0]; Ls = H + M; dev = X.device
         a_c, g_c, cv, Tw = s.band(X, ds_all, Ls)
         x = s._base(inp, None if cv is None else cv.reshape(nb * Ls, -1))
+        if LREC: x = s._rec(x.view(nb, Ls, -1)).reshape(nb * Ls, -1)
         for l in range(CHL + 1): x = s._layer(l, x)
         xs = x.view(nb, Ls, -1); r = s.rms(xs)
         K = F.normalize(r @ s.Wkh, dim=-1); q = F.normalize(r[:, H:] @ s.Wqh, dim=-1)
@@ -386,14 +397,14 @@ def main(cfg):
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
     MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2); NS = cfg.get('ns', NS); K2 = cfg.get('k2', K2)
-    global KQF, BF16, CV, CL, CHL, VFAC, VFULL, HNG, BAL, TIE, VINIT, LRF, QP, LSC, PPOS, HSK, MLP
+    global LREC, KQF, BF16, CV, CL, CHL, VFAC, VFULL, HNG, BAL, TIE, VINIT, LRF, QP, LSC, PPOS, HSK, MLP
     MLP = int(cfg.get('mlp', 0))
     QP = bool(int(cfg.get('qproj', 0))); LSC = float(cfg.get('lsc', 1.0)); PPOS = bool(int(cfg.get('ppos', 0))); HSK = bool(int(cfg.get('hsk', 0)))
     TIE = bool(int(cfg.get('tie', 0))); VINIT = float(cfg.get('vinit', 0.02)); LRF = float(cfg.get('lrfloor', 0.1))
     BAL = float(cfg.get('bal', 0.0))
     HNG = int(cfg.get('hng', 0))
     VFAC = int(cfg.get('vfac', 0)); VFULL = bool(int(cfg.get('vfull', 1)))
-    CV = bool(int(cfg.get('ctxv', 0))); CL = int(cfg.get('ctxl', 0)); CHL = int(cfg.get('ctxh', -1)); HIST = int(cfg.get('hist', 512))
+    CV = bool(int(cfg.get('ctxv', 0))); CL = int(cfg.get('ctxl', 0)); CHL = int(cfg.get('ctxh', -1)); LREC = int(cfg.get('lrec', 0)); HIST = int(cfg.get('hist', 512))
     BF16 = bool(int(cfg.get('bf16', 0)))
     if int(cfg.get('tf32', 0)): torch.backends.cuda.matmul.allow_tf32 = True; torch.backends.cudnn.allow_tf32 = True; torch.set_float32_matmul_precision('high')   # tf32=1: 行列積を TF32 で (出力層など)
     if int(cfg.get('compile', 0)): KQF = torch.compile(_kq_eager)
