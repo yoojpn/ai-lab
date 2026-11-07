@@ -26,6 +26,7 @@ BF16 = False
 CV = False
 CHL = -1             # ctxh=l: l 層の後で 中間表現どうしで Attention (鍵と値が その位置の中間表現)。 -1 で なし
 MLP = 0             # mlp=r: 各層に 小さな密な MLP (d→r→d) を足す ※規則外の診断 (組み合わせを作る力が 傾きを決めているか)
+SCH = 0             # sch=H: 最終層の隠れ状態の連続キャッシュ (Grave 型, 窓 H 語)。 鍵 = 過去の隠れ状態、 値 = その位置の語。 学習する
 QP = False          # qproj=1: ルーティングの問い合わせに 学習する d×d の射影 (単位行列で初期化。 小さな密な行列 ※規則)
 LSC = 1.0           # lsc=x: 各層の出力に 学習するスカラー倍 (初期値 x)
 PPOS = False        # ppos=1: 位置ごとに別の語ベクトル表 (c×V 行) を足す
@@ -99,6 +100,7 @@ class Net(nn.Module):
         s._rows = [None] * L; s._aux = 0.0
         if HNG: s.H = nn.Embedding(1 << HNG, d, sparse=SPARSE); nn.init.normal_(s.H.weight, 0, 0.05); s._hrows = None
         if MLP: s.M1 = nn.ParameterList([nn.Parameter(torch.randn(d, MLP) / d ** 0.5) for _ in range(L)]); s.M2 = nn.ParameterList([nn.Parameter(torch.zeros(MLP, d)) for _ in range(L)])
+        if SCH: s.thc = nn.Parameter(torch.tensor(0.2)); s.scw = nn.Parameter(torch.zeros(d)); s.scb = nn.Parameter(torch.tensor(-2.0))
         if QP: s.Wqp = nn.ParameterList([nn.Parameter(torch.eye(d)) for _ in range(L)])
         if LSC != 1.0: s.lsc = nn.Parameter(torch.full((max(L, 1),), LSC))
         if PPOS: s.Ep = nn.Embedding(c * V, d, sparse=SPARSE); nn.init.normal_(s.Ep.weight, 0, 0.05); s._pprows = None
@@ -233,7 +235,7 @@ class Net(nn.Module):
         K = F.normalize(r @ s.Wkh, dim=-1); q = F.normalize(r[:, H:] @ s.Wqh, dim=-1)
         Kw = K.unfold(1, H, 1)[:, :M]                                                  # (nb,M,DK,H): 位置 m の直前 H 位置の鍵
         sc = s.thh * torch.matmul(q[:, :, None, :], Kw)[:, :, 0].float()               # (nb,M,H)
-        v = (torch.arange(M, device=dev)[:, None] + torch.arange(H, device=dev)[None])[None] >= ds_all[:, H:, None]
+        v = (torch.arange(M, device=dev)[:, None] + torch.arange(H, device=dev)[None] + (MC + 2))[None] >= ds_all[:, H:, None]      # 位置の番号 + MC+2 = X の番号 (ds_all は X の番号)
         sc = sc.masked_fill(~v, -1e9); at = F.softmax(sc, dim=2) * v.any(2)[..., None]
         A = torch.zeros(nb, M, Ls, dtype=at.dtype, device=dev); rows = torch.arange(M, device=dev)[:, None]; A[:, rows, rows + torch.arange(H, device=dev)[None]] = at
         xq = xs[:, H:] + s.Gh[None, None] * torch.bmm(A, r)
@@ -242,6 +244,26 @@ class Net(nn.Module):
         lp = F.log_softmax(F.linear(s.rms(xq), s._U()), dim=1).gather(1, y[:, None])[:, 0]
         pc = (a_c[:, H:] * (Tw[:, H:] == y.view(nb, M)[..., None]).float()).sum(2).reshape(-1); g = g_c[:, H:].reshape(-1)
         return torch.log((1 - g) * lp.exp() + g * pc + 1e-12)
+
+    def logp_band_sc(s, inp, X, y, ds_all, M, H):
+        """sch: 履歴 H 位置 + 予測 M 位置の最終層の隠れ状態を作り、 予測位置が 直前 H 位置の隠れ状態を鍵に (内積)、 その位置の語を値に 引く (連続キャッシュ)。
+        p = (1-λ) p_(網+コピー機構) + λ p_キャッシュ。 λ = sigmoid(w·h + b) (文書の先頭付近は 0)"""
+        nb = X.shape[0]; Ls = H + M; dev = X.device
+        a_c, g_c, cv, Tw = s.band(X, ds_all, Ls)
+        h = s.hidden(inp, None if cv is None else cv.reshape(nb * Ls, -1)); hs = h.view(nb, Ls, -1); hq = hs[:, H:]
+        lp = F.log_softmax(F.linear(hq.reshape(nb * M, -1), s._U()), dim=1).gather(1, y[:, None])[:, 0]
+        pc = (a_c[:, H:] * (Tw[:, H:] == y.view(nb, M)[..., None]).float()).sum(2).reshape(-1); g = g_c[:, H:].reshape(-1)
+        lm = torch.log((1 - g) * lp.exp() + g * pc + 1e-12)
+        tok = X[:, MC + 2:MC + 2 + Ls]; Kw = hs.unfold(1, H, 1)[:, :M]; Tk = tok.unfold(1, H, 1)[:, :M]                      # (nb,M,d,H), (nb,M,H)
+        sc = s.thc * torch.matmul(hq[:, :, None, :], Kw)[:, :, 0].float()
+        v = (torch.arange(M, device=dev)[:, None] + torch.arange(H, device=dev)[None] + (MC + 2))[None] >= ds_all[:, H:, None]
+        sc = sc.masked_fill(~v, -1e9); any_ = v.any(2); at = F.softmax(sc, dim=2) * any_[..., None]
+        pcache = (at * (Tk == y.view(nb, M)[..., None]).float()).sum(2).reshape(-1)
+        lam = (torch.sigmoid(hq.reshape(nb * M, -1) @ s.scw + s.scb) * any_.reshape(-1))
+        return torch.log((1 - lam) * lm.exp() + lam * pcache + 1e-12)
+
+    def logp_hist(s, inp, X, y, ds_all, M, H):
+        return s.logp_band_sc(inp, X, y, ds_all, M, H) if SCH else s.logp_band_h(inp, X, y, ds_all, M, H)
 
     def band(s, X, ds_loc, M):
         """連続した M 個の位置の 文脈キャッシュ (鍵・点・値の足し合わせ) を 列ごとに 1 回で作る (位置ごとに 窓を引き直さない)。
@@ -391,7 +413,7 @@ def main(cfg):
     cnt = np.bincount(S, minlength=V).astype(np.float64); pu = (cnt + 1) / (cnt.sum() + V); rar = -np.log2(pu); rar[0] = 0.0; rar[1] = 0.0
     pos = np.arange(c, N); pos = pos[S[pos] != 0]; rng.shuffle(pos); steps = len(pos) // B
     if SEQB:
-        starts = np.arange(c + (HIST + MC + 2 if CHL >= 0 else 0), N - SEQB, SEQB); rng.shuffle(starts); pos = (starts[:, None] + np.arange(SEQB)[None]).reshape(-1); steps = len(pos) // B
+        starts = np.arange(c + (HIST + MC + 2 if (CHL >= 0 or SCH) else 0), N - SEQB, SEQB); rng.shuffle(starts); pos = (starts[:, None] + np.arange(SEQB)[None]).reshape(-1); steps = len(pos) // B
     EP = int(cfg.get('ep', 1))                              # ep=k: 同じデータを k 回 (毎回 並べ替えて) 学習する
     if EP > 1:
         un_ = SEQB if SEQB else 1; blk_ = pos[:len(pos) // un_ * un_].reshape(-1, un_)
@@ -419,12 +441,12 @@ def main(cfg):
         feats_n3 = [f_ for f_ in feats if f_ != 3]
         def loss_pos(pp_t):                                  # 1 歩の損失 (seqb なら 列ごとの一括計算)
             y = S_t[pp_t]
-            if SEQB and CHL >= 0:                           # ctxh: 履歴 HIST 位置 + 予測 SEQB 位置の中間表現どうしで Attention
+            if SEQB and (CHL >= 0 or SCH):                           # ctxh: 履歴 HIST 位置 + 予測 SEQB 位置の中間表現どうしで Attention
                 pb = pp_t.view(NBLK, SEQB); p0 = pb[:, 0]; Lq = HIST + SEQB; ar_ = torch.arange(Lq, device=DEV)[None]
                 pa = (p0[:, None] - HIST + ar_).reshape(-1); Xe = S_t[(p0[:, None] - HIST - MC - 2 + torch.arange(Lq + MC + 2, device=DEV)[None]).clamp_min(0)]
                 dsa = DS_t[pa].view(NBLK, Lq) - (p0 - HIST - MC - 2)[:, None]
                 inp = make_inputs_t(S_t, pa, DS_t[pa], feats_n3, offs8_t, o1_t, offs2_t)
-                lp = net.logp_band_h(inp, Xe, y, dsa, SEQB, HIST); m_ = (y != 0).float(); return -(lp * m_).sum() / m_.sum().clamp_min(1.0)
+                lp = net.logp_hist(inp, Xe, y, dsa, SEQB, HIST); m_ = (y != 0).float(); return -(lp * m_).sum() / m_.sum().clamp_min(1.0)
             if SEQB:
                 pb = pp_t.view(NBLK, SEQB); p0 = pb[:, 0]; Ls = SEQB + MC + 2
                 Xs = S_t[(p0[:, None] - (MC + 2) + torch.arange(Ls, device=DEV)[None]).clamp_min(0)]; dsl = DS_t[pb] - (p0 - (MC + 2))[:, None]
@@ -444,13 +466,13 @@ def main(cfg):
                 pa = (st_[:, None] - HIST + torch.arange(Lq, device=DEV)[None]).reshape(-1); dsa = Dt[(torch.searchsorted(Dt, pa, right=True) - 1).clamp_min(0)]
                 Xe = Tt[(st_[:, None] - HIST - MC - 2 + torch.arange(Lq + MC + 2, device=DEV)[None]).clamp_min(0)]
                 inp = make_inputs_t(Tt, pa, dsa, [f_ for f_ in feats if f_ != 3], offs8_t, o1_t, offs2_t); y = Tt[(st_[:, None] + torch.arange(SEQB, device=DEV)[None]).reshape(-1)]
-                lp = net.logp_band_h(inp, Xe, y, dsa.view(nb_, Lq) - (st_ - HIST - MC - 2)[:, None], SEQB, HIST)
+                lp = net.logp_hist(inp, Xe, y, dsa.view(nb_, Lq) - (st_ - HIST - MC - 2)[:, None], SEQB, HIST)
                 out[a:a + nb_] = (lp / math.log(2)).view(nb_, SEQB).cpu().numpy()
         net.train(); return out
 
     ENT = {}
     def nn_logp(T, p, ds, bs=1024, starts=None, D=None):
-        if CHL >= 0 and starts is not None:
+        if (CHL >= 0 or SCH) and starts is not None:
             full = nn_logp_blocks(T, D, starts).reshape(-1); Pall = (starts[:, None] + np.arange(SEQB)[None]).reshape(-1)
             u, iu = np.unique(Pall, return_index=True); return full[iu[np.searchsorted(u, p)]]
         out = np.zeros(len(p)); net.eval(); net.cap = True; en = np.zeros(len(p)); gg = np.zeros(len(p))
@@ -474,7 +496,7 @@ def main(cfg):
     ev = {}
     for sp_, nn_ in (('val', cfg['nval']), ('test', cfg['ntest'])):
         T, D = load_split(sp_); starts_ = None
-        if CHL >= 0 or int(cfg.get('eval_blocks', 0)): p, nmain, starts_ = evalset_h(T, D, nn_, cfg.get('nlong', 40000))      # eval_blocks=1: ctxh なしでも 同じ (連続した列の) 位置で測る
+        if CHL >= 0 or SCH or int(cfg.get('eval_blocks', 0)): p, nmain, starts_ = evalset_h(T, D, nn_, cfg.get('nlong', 40000))      # eval_blocks=1: ctxh なしでも 同じ (連続した列の) 位置で測る
         else: p, nmain = evalset(T, D, nn_, cfg.get('nlong', 40000))
         ev[sp_] = dict(T=T, D=D, p=p, nmain=nmain, ds=ds_of(D, p), starts=starts_)
     offs = np.arange(1, c + 1); curve = []; run = 0.0; cnt_ = 0; ts = time.time()

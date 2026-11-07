@@ -63,3 +63,15 @@ X.QP = False; X.LSC = 1.0; X.PPOS = False; X.HNG = 0; X.HSK = False
 # mlp: 小さな密な MLP が 通り、 勾配が届く (M2 は 0 初期化なので 最初の損失は mlp なしと同じ)
 X.MLP = 16; net7 = X.Net(d, c, L, n, kk, k, [1, 2, 3], rar); a, g = net7.cache(inp); h = net7.hidden(inp, net7.ctxv(inp, a))
 l7 = ((h @ net7.U.t()).log_softmax(1)[torch.arange(64), T[pos]]).mean().neg(); l7.backward(); print('mlp 損失 %.3f M2勾配 %.4f' % (l7.item(), net7.M2[0].grad.norm().item())); X.MLP = 0
+
+# sch: 隠れ状態の連続キャッシュ (band 経路)。 損失が出て、 キャッシュのパラメータに勾配が届き、 文書の先頭では λ=0 (= 通常の損失と同じ)
+X.SCH = 1; X.MC = 16; X.HNG = 0; X.QP = False; X.PPOS = False; X.LSC = 1.0
+net7 = X.Net(d, c, L, n, kk, k, [1, 2, 3], rar); M_, H_ = 32, 16; p0 = 400; ar = torch.arange(H_ + M_)
+dsfull = torch.zeros(4000, dtype=torch.long); dsfull[380:] = 380
+pa = p0 - H_ + ar; Xe = T[p0 - H_ - X.MC - 2 + torch.arange(H_ + M_ + X.MC + 2)][None]; dsa = (dsfull[pa] - (p0 - H_ - X.MC - 2))[None]
+inp7 = X.make_inputs_t(T, pa, dsfull[pa], [1, 2], offs8, o1, offs2); y7 = T[p0 + torch.arange(M_)]
+lp7 = net7.logp_hist(inp7, Xe, y7, dsa, M_, H_); (-lp7.mean()).backward()
+print('sch 損失 %.3f  thc勾配 %.4f scw勾配 %.4f' % (-lp7.mean().item(), net7.thc.grad.abs().item(), net7.scw.grad.norm().item()))
+# 文書の先頭 (位置 380) の λ: 履歴が 0 本なら キャッシュは 使われない -> thc を変えても その位置の損失は同じ
+net7.thc.data.fill_(5.0); lp8 = net7.logp_hist(inp7, Xe, y7, dsa, M_, H_); print('先頭位置の差 %.2e (0 であるべき)' % (lp8[0].item() - lp7[0].item() if p0 + 0 == 380 else lp8[0].item() * 0))
+X.SCH = 0
