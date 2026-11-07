@@ -35,6 +35,7 @@ HSK = False         # hsk=1: スキップグラム (-1と-3, -2と-4) のハッ�
 TIE = False         # tie=1: 出力行列 U を 語ベクトル E と共有する
 VINIT = 0.02        # vinit=x: Val 表の初期の大きさ
 LRF = 0.1           # lrfloor=x: 学習率の下限 (線形減衰の終点)。 0 なら 0 まで下げる
+AUXW = 0.0           # aux=w: 各層の「釘が足した分」だけで 次の語を当てさせる補助損失の係数 (釘 = 次の語の分布をもつ塊 になるよう鍛える)。 0 で なし
 BAL = 0.0           # bal=a: ルーティングの偏りを減らす補助損失 (Switch 型: 選ばれた割合 × 平均確率) の係数。 0 で なし
 HNG = 0             # hng=B: 直前2語・3語のハッシュ (2^B 行の表) で行を引いて x に足す (語の組み合わせを表引きの段階で作る)。 0 で なし
 VFAC = 0            # vfac=R: Val の行 (ia,ib) を R 個の 共有部品の積の和 VA[ia]*VB[ib] で作る (行どうしで部品を共有)。 0 で なし
@@ -98,7 +99,7 @@ class Net(nn.Module):
         if VFAC:
             f_ = (0.02 / VFAC ** 0.5) ** 0.5            # R 個の積の和の標準偏差が 0.02 になる大きさ
             s.VA = nn.ParameterList([nn.Parameter(torch.randn(VFAC, n, d) * f_) for _ in range(L)]); s.VB = nn.ParameterList([nn.Parameter(torch.randn(VFAC, n, d) * f_) for _ in range(L)])
-        s._rows = [None] * L; s._aux = 0.0
+        s._rows = [None] * L; s._aux = 0.0; s._o = [None] * L
         if HNG: s.H = nn.Embedding(1 << HNG, d, sparse=SPARSE); nn.init.normal_(s.H.weight, 0, 0.05); s._hrows = None
         if MLP: s.M1 = nn.ParameterList([nn.Parameter(torch.randn(d, MLP) / d ** 0.5) for _ in range(L)]); s.M2 = nn.ParameterList([nn.Parameter(torch.zeros(MLP, d)) for _ in range(L)])
         if SCH: s.thc = nn.Parameter(torch.tensor(0.2)); s.scw = nn.Parameter(torch.zeros(d)); s.scb = nn.Parameter(torch.tensor(-2.0))
@@ -167,7 +168,9 @@ class Net(nn.Module):
             sc, ix = comb.topk(k, dim=1)
             a = F.softmax(sc / s.tau[l].abs().clamp_min(0.05), dim=1)
             ia = i1.gather(1, ix // kk); ib = i2.gather(1, ix % kk); rows = ia * n + ib; s._rows[l] = rows.flatten()
-            x = x + (a[:, :, None] * s._val(l, rows)).sum(1) * (s.lsc[l] if LSC != 1.0 else 1.0)
+            dl_ = (a[:, :, None] * s._val(l, rows)).sum(1) * (s.lsc[l] if LSC != 1.0 else 1.0)
+            if AUXW: s._o[l] = dl_
+            x = x + dl_
             if MLP: x = x + s._mlp(l, x)
         return s.rms(x)
 
@@ -397,11 +400,11 @@ def main(cfg):
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
     MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2); NS = cfg.get('ns', NS); K2 = cfg.get('k2', K2)
-    global LREC, KQF, BF16, CV, CL, CHL, VFAC, VFULL, HNG, BAL, TIE, VINIT, LRF, QP, LSC, PPOS, HSK, MLP
+    global AUXW, LREC, KQF, BF16, CV, CL, CHL, VFAC, VFULL, HNG, BAL, TIE, VINIT, LRF, QP, LSC, PPOS, HSK, MLP
     MLP = int(cfg.get('mlp', 0))
     QP = bool(int(cfg.get('qproj', 0))); LSC = float(cfg.get('lsc', 1.0)); PPOS = bool(int(cfg.get('ppos', 0))); HSK = bool(int(cfg.get('hsk', 0)))
     TIE = bool(int(cfg.get('tie', 0))); VINIT = float(cfg.get('vinit', 0.02)); LRF = float(cfg.get('lrfloor', 0.1))
-    BAL = float(cfg.get('bal', 0.0))
+    BAL = float(cfg.get('bal', 0.0)); AUXW = float(cfg.get('aux', 0.0))
     HNG = int(cfg.get('hng', 0))
     VFAC = int(cfg.get('vfac', 0)); VFULL = bool(int(cfg.get('vfull', 1)))
     CV = bool(int(cfg.get('ctxv', 0))); CL = int(cfg.get('ctxl', 0)); CHL = int(cfg.get('ctxh', -1)); LREC = int(cfg.get('lrec', 0)); HIST = int(cfg.get('hist', 512))
@@ -468,6 +471,12 @@ def main(cfg):
             _lp0 = loss_pos
             def loss_pos(pp_t):
                 net._aux = 0.0; l_ = _lp0(pp_t); return l_ + BAL * net._aux
+        if AUXW:
+            _lp1 = loss_pos
+            def loss_pos(pp_t):                              # 各層の 釘が足した分 (o_l) だけで 次の語を当てる損失を足す (帯の方式 (seqb, ctxh なし) では 位置が y と同じ並び)
+                l_ = _lp1(pp_t); y_ = S_t[pp_t]; m_ = (y_ != 0).float(); aux = 0.0
+                for o_ in net._o: aux = aux + F.cross_entropy(F.linear(net.rms(o_), net._U()), y_, ignore_index=0, reduction='sum') / m_.sum().clamp_min(1.0)
+                return l_ + AUXW * aux / len(net._o)
 
     def nn_logp_blocks(T, D, starts, bs=4):                  # ctxh: 連続した列 (starts から SEQB 位置) ごとに 履歴つきで 損失を出す
         out = np.zeros((len(starts), SEQB)); net.eval(); Tt = torch.from_numpy(T.astype(np.int64)).to(DEV); Dt = torch.from_numpy(np.asarray(D).astype(np.int64)).to(DEV); Lq = HIST + SEQB

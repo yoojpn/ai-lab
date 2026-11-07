@@ -7,8 +7,10 @@ import sys, time, numpy as np, torch
 import exp_ctx as X
 import chat_net
 
-TRAIN = '/tmp/claude-0/-home-claude/3f8e15fc-9ff3-58a6-9cd3-0f9e59c9962a/scratchpad/dl/tok/train.bin'
-VAL = '/tmp/tokhf/tok/val.bin'
+import os
+TRAIN = os.environ.get('TRAIN', '/tmp/claude-0/-home-claude/3f8e15fc-9ff3-58a6-9cd3-0f9e59c9962a/scratchpad/dl/tok/train.bin')
+VAL = os.environ.get('VAL', '/tmp/tokhf/tok/val.bin')
+DEVN = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 
 def ds_local(T, p, back=4096):
@@ -26,8 +28,9 @@ def collect(net, cfg, T, pos, bs=256):
     with torch.no_grad():
         for i in range(0, len(pos), bs):
             p = pos[i:i + bs]; inp = X.make_inputs(T, p, ds[i:i + bs], feats, offs8, o1, offs2)
+            inp = {k_: v_.to(DEVN) for k_, v_ in inp.items()}
             a, g = net.cache(inp); cv = net.ctxv(inp, a); net.hidden(inp, cv)
-            for l in range(net.L): rows[i:i + len(p), l] = net._rows[l].view(len(p), -1)[:, 0].numpy()
+            for l in range(net.L): rows[i:i + len(p), l] = net._rows[l].view(len(p), -1)[:, 0].cpu().numpy()
             if (i // bs) % 20 == 0: print('  %d/%d  %.0f 位置/秒' % (i, len(pos), (i + len(p)) / (time.time() - t0)), flush=True)
     return rows
 
@@ -57,7 +60,7 @@ class Counts:
     def __init__(s, addr, y):
         s.ctx, ci = np.unique(addr, return_inverse=True); s.tot = np.bincount(ci).astype(np.float64)
         pk = keyof([addr, y]); s.pk, s.cnt = np.unique(pk, return_counts=True)
-        up = np.unique(np.stack([ci, y], 1), axis=0); s.kind = np.bincount(up[:, 0], minlength=len(s.ctx)).astype(np.float64)   # 住所ごとの 次の語の種類数
+        up = np.unique(ci.astype(np.int64) * 32768 + y.astype(np.int64)); s.kind = np.bincount(up // 32768, minlength=len(s.ctx)).astype(np.float64)   # 住所ごとの 次の語の種類数
 
     def lookup(s, addr, y):
         """各位置の p(y | 住所) の材料: 合計, 種類数, y の回数, 住所が表にあるか"""
@@ -77,7 +80,7 @@ def wb_chain(levels, y, V=32768, lam=1.0):
 
 
 if __name__ == '__main__':
-    net, cfg = chat_net.load(sys.argv[1]); N = int(sys.argv[2]); NV = int(sys.argv[3]); out = sys.argv[4] if len(sys.argv) > 4 else None
+    net, cfg = chat_net.load(sys.argv[1]); X.DEV = DEVN; net = net.to(DEVN); N = int(sys.argv[2]); NV = int(sys.argv[3]); out = sys.argv[4] if len(sys.argv) > 4 else None
     Ttr = np.memmap(TRAIN, dtype=np.uint16, mode='r'); Tv = np.fromfile(VAL, dtype=np.uint16).astype(np.int64)
     BL = 2000; nbk = max(N // BL, 1); N = nbk * BL; rng = np.random.default_rng(5); st = np.sort(rng.integers(5000, len(Ttr) - BL - 10, nbk))
     segs = [np.asarray(Ttr[q - 4100:q + BL]).astype(np.int64) for q in st]; Ttrain = np.concatenate(segs)                # 学習位置は BL 個ずつの連続ブロック (各ブロックの前に 4100 語の窓)
@@ -104,3 +107,14 @@ if __name__ == '__main__':
     # 一様 (語の分布のみ) の損失
     C = Counts(np.zeros(len(ytr), dtype=np.uint64), ytr); lv = C.lookup(np.zeros(len(yv), dtype=np.uint64), yv); p = wb_chain([lv], yv)
     print('語の頻度のみ: 損失 %.4f' % (-np.log2(np.maximum(p, 1e-12)).mean()))
+
+    # 経路 と 語 の鎖を 混ぜる / 経路 + 語 の結合住所
+    Pl = []
+    for j in range(1, L + 1): Pl.append(Counts(keyof([Rtr[:, l] for l in range(j)]), ytr).lookup(keyof([Rv[:, l] for l in range(j)]), yv))
+    lp_, _ = tune(Pl, yv); pp = wb_chain(Pl, yv, lam=lp_); Tl = []
+    for o_ in (1, 2, 3): Tl.append(Counts(keyof([Ttrain[ptr_c - k] for k in range(1, o_ + 1)]), ytr).lookup(keyof([Tv[pv - k] for k in range(1, o_ + 1)]), yv))
+    lt_, lst = tune(Tl, yv); pt = wb_chain(Tl, yv, lam=lt_); bits = lambda p_: -np.log2(np.maximum(p_, 1e-12)).mean()
+    print('PATH_RESULT 経路4個 %.4f (被覆 %.3f) | 語3個 %.4f (被覆 %.3f) | 混合 0.5: %.4f' % (bits(pp), Pl[-1][3].mean(), lst, Tl[-1][3].mean(), bits(0.5 * pp + 0.5 * pt)), flush=True)
+    jl = lambda j, o_: Counts(keyof([Rtr[:, l] for l in range(j)] + [Ttrain[ptr_c - k] for k in range(1, o_ + 1)]), ytr).lookup(keyof([Rv[:, l] for l in range(j)] + [Tv[pv - k] for k in range(1, o_ + 1)]), yv)
+    chain = Tl[:2] + [jl(2, 1), jl(L, 1), jl(2, 2), jl(L, 2)]; lc_, lsc_ = tune(chain, yv)
+    print('PATH_RESULT 結合の鎖 %.4f' % lsc_, flush=True)
