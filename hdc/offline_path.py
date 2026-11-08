@@ -85,26 +85,26 @@ def tune(levels, y):
 
 
 if __name__ == '__main__':
-    net, cfg = chat_net.load(sys.argv[1]); SEQ = int(cfg.get('seqb', 512)); X.DEV = DEVN; net = net.to(DEVN); N = int(sys.argv[2]); NV = int(sys.argv[3]); L = net.L
+    net, cfg = chat_net.load(sys.argv[1]); SEQ = int(cfg.get('seqb', 512)); X.DEV = DEVN; net = net.to(DEVN); Ns = [int(v) for v in sys.argv[2].split(',')]; NV = int(sys.argv[3]); L = net.L; N = max(Ns)
     Ttr = np.memmap(TRAIN, dtype=np.uint16, mode='r'); Tv = np.fromfile(VAL, dtype=np.uint16).astype(np.int64)
     BL = 4096; nbk = max(N // BL, 1); rng = np.random.default_rng(5); st = np.sort(rng.integers(5000, len(Ttr) - BL - 10, nbk))
     Ttrain = np.concatenate([np.asarray(Ttr[q - 4100:q + BL]).astype(np.int64) for q in st])                 # 学習位置は BL 個ずつの連続ブロック (各ブロックの前に 4100 語の窓)
     ptr_all = np.concatenate([i * (4100 + BL) + 4100 + np.arange(BL) for i in range(nbk)])
     nvb = -(-NV // 4096); rv = np.random.default_rng(777); sv = np.sort(rv.integers(5000, len(Tv) - 4096 - 10, nvb)); pv_all = (sv[:, None] + np.arange(4096)[None]).reshape(-1)      # val も 4096 位置ずつの連続ブロック (seqb ごとに 区切って再帰を通す)
-    print('lrec=%d  学習位置 %d  val 位置 %d' % (X.LREC, len(ptr_all), len(pv_all)), flush=True)
+    print('lrec=%d  学習位置 最大 %d  val 位置 %d' % (X.LREC, len(ptr_all), len(pv_all)), flush=True)
     Rtr_all = collect(net, cfg, Ttrain, ptr_all); Rv_all = collect(net, cfg, Tv, pv_all)
-    ok = Ttrain[ptr_all] != 0; ptr_c, Rtr, ytr = ptr_all[ok], Rtr_all[ok], Ttrain[ptr_all[ok]]                       # 文書の区切り (0) を予測する位置は 除く
     okv = Tv[pv_all] != 0; pv, Rv, yv = pv_all[okv], Rv_all[okv], Tv[pv_all[okv]]; yv_n = len(yv)
-    Pl = []
-    for j in range(1, L + 1):
-        Pl.append(Counts(keyof([Rtr[:, l] for l in range(j)]), ytr).lookup(keyof([Rv[:, l] for l in range(j)]), yv)); lam, ls = tune(Pl, yv)
-        print('経路 先頭 %d 個: 被覆 %.3f  損失 %.4f (バックオフ込み, lam=%s)' % (j, Pl[-1][3].mean(), ls, lam), flush=True)
-    pp = wb_chain(Pl, yv, lam=lam); Tl = []
-    for o_ in (1, 2, 3):
-        Tl.append(Counts(keyof([Ttrain[ptr_c - k] for k in range(1, o_ + 1)]), ytr).lookup(keyof([Tv[pv - k] for k in range(1, o_ + 1)]), yv)); lt_, lst = tune(Tl, yv)
-        print('語 %d 個: 被覆 %.3f  損失 %.4f (lam=%s)' % (o_, Tl[-1][3].mean(), lst, lt_), flush=True)
-    pt = wb_chain(Tl, yv, lam=lt_)
-    print('PATH_RESULT 経路4個 %.4f (被覆 %.3f) | 語3個 %.4f (被覆 %.3f) | 混合 0.5: %.4f' % (bits(pp), Pl[-1][3].mean(), bits(pt), Tl[-1][3].mean(), bits(0.5 * pp + 0.5 * pt)), flush=True)
-    jl = lambda j, o_: Counts(keyof([Rtr[:, l] for l in range(j)] + [Ttrain[ptr_c - k] for k in range(1, o_ + 1)]), ytr).lookup(keyof([Rv[:, l] for l in range(j)] + [Tv[pv - k] for k in range(1, o_ + 1)]), yv)
-    chain = Tl[:2] + [jl(2, 1), jl(L, 1), jl(2, 2), jl(L, 2)]; lc_, lsc_ = tune(chain, yv)
-    print('PATH_RESULT 結合の鎖 %.4f  (評価位置 %d)' % (lsc_, yv_n), flush=True)
+    for n_ in Ns:
+        nb_n = max(n_ // BL, 1); sel = np.unique(np.linspace(0, nbk - 1, nb_n).astype(np.int64)); idx = (sel[:, None] * BL + np.arange(BL)[None]).reshape(-1)       # 学習位置を ブロック単位で 等間隔に n_ 位置分えらぶ
+        ok = Ttrain[ptr_all[idx]] != 0; ptr_c, Rtr, ytr = ptr_all[idx][ok], Rtr_all[idx][ok], Ttrain[ptr_all[idx][ok]]               # 文書の区切り (0) を予測する位置は 除く
+        t0 = time.time(); Pl = []
+        for j in range(1, L + 1):
+            Pl.append(Counts(keyof([Rtr[:, l] for l in range(j)]), ytr).lookup(keyof([Rv[:, l] for l in range(j)]), yv)); lam, ls = tune(Pl, yv)
+        pp = wb_chain(Pl, yv, lam=lam); Tl = []
+        for o_ in (1, 2, 3):
+            Tl.append(Counts(keyof([Ttrain[ptr_c - k] for k in range(1, o_ + 1)]), ytr).lookup(keyof([Tv[pv - k] for k in range(1, o_ + 1)]), yv)); lt_, lst = tune(Tl, yv)
+        pt = wb_chain(Tl, yv, lam=lt_)
+        print('PATH_RESULT 数える位置 %d: 経路4個 %.4f (被覆 %.3f) | 語3個 %.4f (被覆 %.3f) | 混合 0.5: %.4f' % (len(ytr), bits(pp), Pl[-1][3].mean(), bits(pt), Tl[-1][3].mean(), bits(0.5 * pp + 0.5 * pt)), flush=True)
+        jl = lambda j, o_: Counts(keyof([Rtr[:, l] for l in range(j)] + [Ttrain[ptr_c - k] for k in range(1, o_ + 1)]), ytr).lookup(keyof([Rv[:, l] for l in range(j)] + [Tv[pv - k] for k in range(1, o_ + 1)]), yv)
+        chain = Tl[:2] + [jl(2, 1), jl(L, 1), jl(2, 2), jl(L, 2)]; lc_, lsc_ = tune(chain, yv)
+        print('PATH_RESULT 数える位置 %d: 結合の鎖 %.4f  (評価位置 %d, %.0f秒)' % (len(ytr), lsc_, yv_n, time.time() - t0), flush=True)
