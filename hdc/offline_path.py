@@ -11,7 +11,7 @@ import chat_net
 TRAIN = os.environ.get('TRAIN', '/tmp/claude-0/-home-claude/3f8e15fc-9ff3-58a6-9cd3-0f9e59c9962a/scratchpad/dl/tok/train.bin')
 VAL = os.environ.get('VAL', '/tmp/tokhf/tok/val.bin')
 DEVN = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-SEQ = 512
+SEQ = 512            # 再帰層の網では cfg の seqb (学習時の 連続列の長さ) に合わせる
 
 
 def ds_all(T):
@@ -19,7 +19,7 @@ def ds_all(T):
     idx = np.arange(len(T)); lz = np.maximum.accumulate(np.where(T == 0, idx, -1)); ds = np.zeros(len(T), dtype=np.int64); ds[1:] = lz[:-1] + 1; return ds
 
 
-def collect(net, cfg, T, pos, bs=4096):
+def collect(net, cfg, T, pos, bs=8192):
     """pos の各位置で 4 層の最上位の釘を集める。 再帰層の網では pos が SEQ 位置ずつ連続している必要がある"""
     c = cfg.get('c', 8); feats = list(cfg.get('feats', [])); dev = DEVN
     offs8 = torch.arange(1, c + 1, device=dev); o1 = [(1 + (torch.arange(X.NS) * w) // X.NS).to(dev) for w in X.W1]; offs2 = torch.arange(c + 1, X.W2 + 1, device=dev)
@@ -85,12 +85,12 @@ def tune(levels, y):
 
 
 if __name__ == '__main__':
-    net, cfg = chat_net.load(sys.argv[1]); X.DEV = DEVN; net = net.to(DEVN); N = int(sys.argv[2]); NV = int(sys.argv[3]); L = net.L
+    net, cfg = chat_net.load(sys.argv[1]); SEQ = int(cfg.get('seqb', 512)); X.DEV = DEVN; net = net.to(DEVN); N = int(sys.argv[2]); NV = int(sys.argv[3]); L = net.L
     Ttr = np.memmap(TRAIN, dtype=np.uint16, mode='r'); Tv = np.fromfile(VAL, dtype=np.uint16).astype(np.int64)
-    BL = 2048; nbk = max(N // BL, 1); rng = np.random.default_rng(5); st = np.sort(rng.integers(5000, len(Ttr) - BL - 10, nbk))
+    BL = 4096; nbk = max(N // BL, 1); rng = np.random.default_rng(5); st = np.sort(rng.integers(5000, len(Ttr) - BL - 10, nbk))
     Ttrain = np.concatenate([np.asarray(Ttr[q - 4100:q + BL]).astype(np.int64) for q in st])                 # 学習位置は BL 個ずつの連続ブロック (各ブロックの前に 4100 語の窓)
     ptr_all = np.concatenate([i * (4100 + BL) + 4100 + np.arange(BL) for i in range(nbk)])
-    nvb = -(-NV // SEQ); rv = np.random.default_rng(777); sv = np.sort(rv.integers(5000, len(Tv) - SEQ - 10, nvb)); pv_all = (sv[:, None] + np.arange(SEQ)[None]).reshape(-1)
+    nvb = -(-NV // 4096); rv = np.random.default_rng(777); sv = np.sort(rv.integers(5000, len(Tv) - 4096 - 10, nvb)); pv_all = (sv[:, None] + np.arange(4096)[None]).reshape(-1)      # val も 4096 位置ずつの連続ブロック (seqb ごとに 区切って再帰を通す)
     print('lrec=%d  学習位置 %d  val 位置 %d' % (X.LREC, len(ptr_all), len(pv_all)), flush=True)
     Rtr_all = collect(net, cfg, Ttrain, ptr_all); Rv_all = collect(net, cfg, Tv, pv_all)
     ok = Ttrain[ptr_all] != 0; ptr_c, Rtr, ytr = ptr_all[ok], Rtr_all[ok], Ttrain[ptr_all[ok]]                       # 文書の区切り (0) を予測する位置は 除く
