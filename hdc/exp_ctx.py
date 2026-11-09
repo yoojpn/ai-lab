@@ -24,6 +24,7 @@ def _kq_eager(ew, vv, e0, p0, p1):
     return F.normalize(kq, dim=-1)
 BF16 = False
 CV = False
+SHARE = 0            # share=1: 全ての層 (弾く回数 L) で 同じ盤 (K1, K2, Val) を使う = 盤を共有して L 回弾く
 LRESET = 0           # lreset=1: 再帰の状態を 文書の区切り (直前の語が 0) で 0 に戻す
 LREC = 0             # lrec=1: 履歴を含む列で 入力の直後に 線形再帰層 (Mamba 系の考え方: 入力で決まる減衰 a_t, s_t = a_t*s_(t-1) + u_t) を足す (ctxh=l と一緒に使う)
 CHL = -1             # ctxh=l: l 層の後で 中間表現どうしで Attention (鍵と値が その位置の中間表現)。 -1 で なし
@@ -93,9 +94,10 @@ class Net(nn.Module):
         s.d, s.c, s.L, s.n, s.kk, s.k, s.feats = d, c, L, n, kk, k, feats
         s.E = nn.Embedding(V, d, sparse=SPARSE); nn.init.normal_(s.E.weight, 0, 0.1)
         s.P = nn.Parameter(torch.randn(c, d) * 0.1 + 1.0)
-        s.K1 = nn.ParameterList([nn.Parameter(torch.randn(n, d // 2) * 0.5) for _ in range(L)])
-        s.K2 = nn.ParameterList([nn.Parameter(torch.randn(n, d // 2) * 0.5) for _ in range(L)])
-        s.Val = nn.ModuleList([nn.Embedding(n * n, d, sparse=SPARSE) for _ in range(L)] if (VFULL or not VFAC) else [])
+        NB_ = 1 if SHARE else L
+        s.K1 = nn.ParameterList([nn.Parameter(torch.randn(n, d // 2) * 0.5) for _ in range(NB_)])
+        s.K2 = nn.ParameterList([nn.Parameter(torch.randn(n, d // 2) * 0.5) for _ in range(NB_)])
+        s.Val = nn.ModuleList([nn.Embedding(n * n, d, sparse=SPARSE) for _ in range(NB_)] if (VFULL or not VFAC) else [])
         for v in s.Val: nn.init.normal_(v.weight, 0, VINIT)
         if VFAC:
             f_ = (0.02 / VFAC ** 0.5) ** 0.5            # R 個の積の和の標準偏差が 0.02 になる大きさ
@@ -161,7 +163,8 @@ class Net(nn.Module):
             q = s.rms(x)
             q = q @ s.Wqp[l] if QP else q
             q1, q2 = q[:, :h], q[:, h:]
-            s1 = q1 @ s.K1[l].t() / math.sqrt(h); s2_ = q2 @ s.K2[l].t() / math.sqrt(h)
+            lp = 0 if SHARE else l
+            s1 = q1 @ s.K1[lp].t() / math.sqrt(h); s2_ = q2 @ s.K2[lp].t() / math.sqrt(h)
             v1, i1 = s1.topk(kk, dim=1); v2, i2 = s2_.topk(kk, dim=1)
             if BAL:                                          # 鍵の使われ方を ならす (選ばれた割合 f と 平均確率 P の積)
                 for sc_, ii_ in ((s1, i1), (s2_, i2)):
@@ -171,7 +174,7 @@ class Net(nn.Module):
             sc, ix = comb.topk(k, dim=1)
             a = F.softmax(sc / s.tau[l].abs().clamp_min(0.05), dim=1)
             ia = i1.gather(1, ix // kk); ib = i2.gather(1, ix % kk); rows = ia * n + ib; s._rows[l] = rows.flatten()
-            dl_ = (a[:, :, None] * s._val(l, rows)).sum(1) * (s.lsc[l] if LSC != 1.0 else 1.0)
+            dl_ = (a[:, :, None] * s._val(lp, rows)).sum(1) * (s.lsc[l] if LSC != 1.0 else 1.0)
             if AUXW: s._o[l] = dl_
             x = x + dl_
             if MLP: x = x + s._mlp(l, x)
@@ -219,7 +222,8 @@ class Net(nn.Module):
         q = s.rms(x)
         q = q @ s.Wqp[l] if QP else q
         q1, q2 = q[:, :h], q[:, h:]
-        s1 = q1 @ s.K1[l].t() / math.sqrt(h); s2_ = q2 @ s.K2[l].t() / math.sqrt(h)
+        lp = 0 if SHARE else l
+        s1 = q1 @ s.K1[lp].t() / math.sqrt(h); s2_ = q2 @ s.K2[lp].t() / math.sqrt(h)
         v1, i1 = s1.topk(kk, dim=1); v2, i2 = s2_.topk(kk, dim=1)
         if BAL:                                          # 鍵の使われ方を ならす (選ばれた割合 f と 平均確率 P の積)
             for sc_, ii_ in ((s1, i1), (s2_, i2)):
@@ -229,7 +233,7 @@ class Net(nn.Module):
         sc, ix = comb.topk(k, dim=1)
         a = F.softmax(sc / s.tau[l].abs().clamp_min(0.05), dim=1)
         ia = i1.gather(1, ix // kk); ib = i2.gather(1, ix % kk); rows = ia * n + ib; s._rows[l] = rows.flatten()
-        x = x + (a[:, :, None] * s._val(l, rows)).sum(1) * (s.lsc[l] if LSC != 1.0 else 1.0)
+        x = x + (a[:, :, None] * s._val(lp, rows)).sum(1) * (s.lsc[l] if LSC != 1.0 else 1.0)
         return x + s._mlp(l, x) if MLP else x
 
     def _rec(s, x, T=32, reset=None):
@@ -405,14 +409,14 @@ def main(cfg):
     t0 = time.time(); lg = lambda m: print('[%6ds] %s' % (time.time() - t0, m), flush=True)
     torch.set_num_threads(os.cpu_count() or 2); torch.manual_seed(cfg.get('seed', 0)); rng = np.random.default_rng(cfg.get('seed', 0))
     MC = cfg.get('mc', MC); W2 = cfg.get('w2', W2); NS = cfg.get('ns', NS); K2 = cfg.get('k2', K2)
-    global LRESET, AUXW, LREC, KQF, BF16, CV, CL, CHL, VFAC, VFULL, HNG, BAL, TIE, VINIT, LRF, QP, LSC, PPOS, HSK, MLP
+    global SHARE, LRESET, AUXW, LREC, KQF, BF16, CV, CL, CHL, VFAC, VFULL, HNG, BAL, TIE, VINIT, LRF, QP, LSC, PPOS, HSK, MLP
     MLP = int(cfg.get('mlp', 0))
     QP = bool(int(cfg.get('qproj', 0))); LSC = float(cfg.get('lsc', 1.0)); PPOS = bool(int(cfg.get('ppos', 0))); HSK = bool(int(cfg.get('hsk', 0)))
     TIE = bool(int(cfg.get('tie', 0))); VINIT = float(cfg.get('vinit', 0.02)); LRF = float(cfg.get('lrfloor', 0.1))
     BAL = float(cfg.get('bal', 0.0)); AUXW = float(cfg.get('aux', 0.0))
     HNG = int(cfg.get('hng', 0))
     VFAC = int(cfg.get('vfac', 0)); VFULL = bool(int(cfg.get('vfull', 1)))
-    CV = bool(int(cfg.get('ctxv', 0))); CL = int(cfg.get('ctxl', 0)); CHL = int(cfg.get('ctxh', -1)); LREC = int(cfg.get('lrec', 0)); LRESET = int(cfg.get('lreset', 0)); HIST = int(cfg.get('hist', 512))
+    CV = bool(int(cfg.get('ctxv', 0))); CL = int(cfg.get('ctxl', 0)); CHL = int(cfg.get('ctxh', -1)); LREC = int(cfg.get('lrec', 0)); LRESET = int(cfg.get('lreset', 0)); SHARE = int(cfg.get('share', 0)); HIST = int(cfg.get('hist', 512))
     BF16 = bool(int(cfg.get('bf16', 0)))
     if int(cfg.get('tf32', 0)): torch.backends.cuda.matmul.allow_tf32 = True; torch.backends.cudnn.allow_tf32 = True; torch.set_float32_matmul_precision('high')   # tf32=1: 行列積を TF32 で (出力層など)
     if int(cfg.get('compile', 0)): KQF = torch.compile(_kq_eager)
@@ -441,7 +445,7 @@ def main(cfg):
     net = Net(d, c, L, n, kk, k, feats, rar).to(DEV); npar = sum(p.numel() for p in net.parameters())
     lg('L=%d feats=%s B=%d 学習語 %d 歩数 %d パラメータ %.1fM 窓: 部品2=%d 部品3=%d' % (L, feats, B, len(pos), steps, npar / 1e6, W2, MC))
     use_graph = bool(fast and DEV.type == 'cuda' and int(cfg.get('graph', 1)))
-    rowsrc = {id(v_.weight): (lambda l_=l_: net._rows[l_]) for l_, v_ in enumerate(net.Val)} if int(cfg.get('rowwise', 1)) else {}
+    rowsrc = {id(v_.weight): ((lambda: torch.cat(net._rows)) if SHARE else (lambda l_=l_: net._rows[l_])) for l_, v_ in enumerate(net.Val)} if int(cfg.get('rowwise', 1)) else {}
     if HNG and rowsrc is not None and int(cfg.get('rowwise', 1)): rowsrc[id(net.H.weight)] = (lambda: net._hrows)
     if PPOS and rowsrc is not None and int(cfg.get('rowwise', 1)): rowsrc[id(net.Ep.weight)] = (lambda: net._pprows)
     sinks = {}
