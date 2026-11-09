@@ -76,7 +76,7 @@ LV = [('hi だけ', [Hh], [Hv]), ('hi+第1候補', [Hh, Wh], [Hv, Wv]), ('hi+第
 lookups = []
 for name, ch, cv in LV:
     C = Counts(keyof([x.astype(np.int64) for x in ch]), yh); lookups.append(C.lookup(keyof([x.astype(np.int64) for x in cv]), yv))
-GR = (0.5, 2, 8, 32, 128, 512, 2048)
+GR = (0.5, 2, 8, 32, 128, 512, 2048, 1e4, 1e5, 1e6, 1e7, 1e12)      # 1e12 = その段を使わない (粗い鍵は 合計が大きいので lam も大きく要る)
 
 
 def chain(P0, ks, lams):
@@ -88,7 +88,7 @@ def chain(P0, ks, lams):
 
 lg('RESID_RESULT 基準 n-gram だけ (val 後半 %d 位置): %.4f bit' % (len(pv) - h2, bits(Pv[h2:])))
 for name_, ks in (('hi だけ(較正)', [0]), ('hi + 第1候補', [0, 1]), ('hi + 第1候補 + 前1語', [0, 1, 2]), ('hi + 第1候補 + 前2語', [0, 1, 3]), ('第1候補+前1語 (hi なし)', [4])):
-    lams = [8.0] * len(ks)
+    lams = [1e12] * len(ks)
     for _ in range(2):
         for i in range(len(ks)):
             best = None
