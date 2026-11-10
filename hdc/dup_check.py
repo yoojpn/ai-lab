@@ -8,7 +8,11 @@ import numpy as np
 import engine as E
 
 TOK = sys.argv[1]; D = sys.argv[2]; SIZES = [int(x) for x in sys.argv[3].split(',')]; NV = int(sys.argv[4]) if len(sys.argv) > 4 else 60000
-t0 = time.time(); lg = lambda s: print('[%5ds] %s' % (time.time() - t0, s), flush=True); os.makedirs(D, exist_ok=True)
+t0 = time.time(); OUT = os.environ.get('DUP_OUT')
+def lg(s):
+    m = '[%5ds] %s' % (time.time() - t0, s); print(m, flush=True)
+    if OUT: open(OUT, 'a').write(m + '\n')
+os.makedirs(D, exist_ok=True)
 W = 24; C1 = np.uint64(0x9E3779B97F4A7C15)
 Ttr = np.memmap(TOK + '/train.bin', dtype=np.uint16, mode='r'); NT = len(Ttr); Tv = np.fromfile(TOK + '/val.bin', dtype=np.uint16)
 
