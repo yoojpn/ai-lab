@@ -3,7 +3,7 @@
 環境変数: HF_TOKEN, TINY=1 (試運転: 小さい量 / HF に上げない), WORK (作業フォルダ), TOTAL_TOK, SHARD_TOK, TIME_BUDGET_H"""
 import os, sys, time, json, hashlib, threading, queue, subprocess, shutil, random, io, lzma
 import numpy as np
-os.environ.setdefault('HF_HUB_DISABLE_PROGRESS_BARS', '1')
+os.environ.setdefault('HF_HUB_DISABLE_PROGRESS_BARS', '1'); os.environ.setdefault('RAYON_NUM_THREADS', '2')
 
 TINY = os.environ.get('TINY') == '1'
 TOKEN = os.environ.get('HF_TOKEN', '')
@@ -27,12 +27,25 @@ import pyarrow.parquet as pq
 api = HfApi(token=TOKEN); fsys = HfFileSystem(token=TOKEN)
 
 
-def hf_up(local, remote, tries=6):
+from huggingface_hub import CommitOperationAdd
+
+
+def hf_up_many(pairs, tries=40):
+    """複数のファイルを 1 コミットで 保存 (HF は 1 時間に 128 コミットまで)。 制限に当たったら 待って やり直す"""
     if TINY: return True
+    pairs = [(l, r) for l, r in pairs if os.path.exists(l)]
     for k in range(tries):
-        try: api.upload_file(path_or_fileobj=local, path_in_repo=remote, repo_id=REPO, repo_type='dataset'); return True
-        except Exception as e: lg('upload 失敗 %s (%d): %s' % (remote, k, str(e)[:120])); time.sleep(20 * (k + 1))
+        try:
+            api.create_commit(repo_id=REPO, repo_type='dataset', operations=[CommitOperationAdd(path_in_repo=r, path_or_fileobj=l) for l, r in pairs], commit_message='fm build ' + ','.join(r for _, r in pairs)[:100]); return True
+        except Exception as e:
+            msg = str(e)
+            if k < 3 or k % 5 == 0: lg('upload 失敗 %s (%d): %s' % (pairs[0][1], k, msg[-160:].replace('\n', ' ')))
+            time.sleep(min(150, 30 * (k + 1)))
     return False
+
+
+def hf_up(local, remote, tries=40):
+    return hf_up_many([(local, remote)], tries)
 
 
 def hf_files(repo, prefix):
@@ -52,23 +65,33 @@ def prefetch(gen, depth=3):
 
     def out():
         while True:
-            x = q.get()
+            try: x = q.get(timeout=900)
+            except queue.Empty: lg('読み込みが 15 分 止まった: この源を 尽きたことにする'); return
             if x is DONE: return
             yield x
     return out()
 
 
+def dl(repo, path):
+    """ファイルを まるごと ダウンロード (範囲読みより 30 倍ほど速い)。 戻り値: 手元のパス"""
+    for k in range(5):
+        try: return hf_hub_download(repo, path, repo_type='dataset', token=TOKEN, local_dir=WORK + '/dl/' + repo.replace('/', '_'))
+        except Exception as e: lg('ダウンロード失敗 %s %s (%d)' % (repo, path, k)); time.sleep(10 * (k + 1))
+    raise RuntimeError('download failed ' + path)
+
+
 def pq_rows(repo, files, cols, rg_step, seed, skip=0):
-    """行グループ単位で 複数ファイルを ばらして読む (ファイルを順に 一部だけ)。 戻り値: 行 (辞書) の列"""
+    """ファイルを 1 つずつ ダウンロードして 行グループを (rg_step おきに) 読み、 使い終わったら 消す"""
     rng = random.Random(seed); files = list(files); rng.shuffle(files)
     for f in files:
+        p = None
         try:
-            with fsys.open('datasets/%s/%s' % (repo, f), 'rb') as fh:
-                pf = pq.ParquetFile(fh); n = pf.num_row_groups; off = rng.randrange(rg_step)
-                for rg in range(off, n, rg_step):
-                    t = pf.read_row_group(rg, columns=cols).to_pylist()
-                    for r in t: yield r
+            p = dl(repo, f); pf = pq.ParquetFile(p); n = pf.num_row_groups; off = rng.randrange(rg_step)
+            for rg in range(off, n, rg_step):
+                for r in pf.read_row_group(rg, columns=cols).to_pylist(): yield r
         except Exception as e: lg('ファイル失敗 %s: %s' % (f, str(e)[:120]))
+        finally:
+            if p and os.path.exists(p): os.remove(p)
 
 
 def src_web(repo, prefix, textcol='text', rg_step=8, minchar=80, extra=None, seed=1):
@@ -80,7 +103,7 @@ def src_web(repo, prefix, textcol='text', rg_step=8, minchar=80, extra=None, see
 
 
 def src_ja(seed=1):
-    for r in pq_rows('HuggingFaceFW/fineweb-2', [f for f in hf_files('HuggingFaceFW/fineweb-2', 'data/jpn_Jpan/train') if f.endswith('.parquet')], ['text', 'language_score'], 8, seed):
+    for r in pq_rows('HuggingFaceFW/fineweb-2', [f for f in hf_files('HuggingFaceFW/fineweb-2', 'data/jpn_Jpan/train') if f.endswith('.parquet')], ['text', 'language_score'], 3, seed):
         if r['text'] and len(r['text']) >= 80 and (r.get('language_score') or 0) >= 0.8: yield [r['text'][:60000]], False
 
 
@@ -104,7 +127,7 @@ def src_se(seed=1):
     random.Random(seed).shuffle(files)
     for f in files:
         try:
-            with fsys.open('datasets/HuggingFaceH4/stack-exchange-preferences/' + f, 'rb') as fh: t = pq.read_table(fh, columns=['question', 'answers']).to_pylist()
+            p = dl('HuggingFaceH4/stack-exchange-preferences', f); t = pq.read_table(p, columns=['question', 'answers']).to_pylist(); os.remove(p)
         except Exception as e: lg('SE 失敗 %s %s' % (f, str(e)[:100])); continue
         for r in t:
             ans = r.get('answers') or []
@@ -114,12 +137,16 @@ def src_se(seed=1):
 
 
 def jsonl_lines(repo, path):
-    with fsys.open('datasets/%s/%s' % (repo, path), 'rb') as fh:
-        for ln in io.TextIOWrapper(fh, encoding='utf-8'):
-            ln = ln.strip()
-            if ln:
-                try: yield json.loads(ln)
-                except Exception: pass
+    p = dl(repo, path)
+    try:
+        with open(p, encoding='utf-8') as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if ln:
+                    try: yield json.loads(ln)
+                    except Exception: pass
+    finally:
+        if os.path.exists(p): os.remove(p)
 
 
 def to_utts(d):
@@ -140,7 +167,7 @@ def src_oasst1(seed=1):
     rows = []
     for f in hf_files('OpenAssistant/oasst1', 'data/'):
         if f.endswith('.parquet'):
-            with fsys.open('datasets/OpenAssistant/oasst1/' + f, 'rb') as fh: rows += pq.read_table(fh, columns=['message_id', 'parent_id', 'text', 'deleted']).to_pylist()
+            p = dl('OpenAssistant/oasst1', f); rows += pq.read_table(p, columns=['message_id', 'parent_id', 'text', 'deleted']).to_pylist(); os.remove(p)
     by = {r['message_id']: r for r in rows if not r['deleted']}; ch = set(r['parent_id'] for r in by.values() if r['parent_id'])
     leaves = [m for m in by if m not in ch]; random.Random(seed).shuffle(leaves)
     for m in leaves:
@@ -182,7 +209,7 @@ from tokenizers import Tokenizer
 tkp = hf_hub_download(REPO, 'tok/tok.json', repo_type='dataset', token=TOKEN, local_dir=WORK + '/tokhf'); TK = Tokenizer.from_file(tkp)
 M1 = np.uint64(0x9E3779B97F4A7C15); M2 = np.uint64(0xBF58476D1CE4E5B9); M3 = np.uint64(0x94D049BB133111EB); M4 = np.uint64(0x2545F4914F6CDD1D); WIN = 32
 G = np.empty(0, np.uint64)          # 見た窓の鍵 (整列済み) + 文書全体のハッシュ
-P = np.empty(0, np.uint64)          # この分割の中で 追加した鍵
+P = []                              # この分割の中で 追加した鍵 (整列済みの塊の列)
 
 
 def mix(a):
@@ -202,6 +229,12 @@ def keys_of(arrs):
     return wk, wd, dh
 
 
+def isin_chunks(chunks, x):
+    r = np.zeros(len(x), bool)
+    for c in chunks: r |= isin_sorted(c, x)
+    return r
+
+
 def isin_sorted(S, x):
     if len(S) == 0: return np.zeros(len(x), bool)
     j = np.minimum(np.searchsorted(S, x), len(S) - 1); return S[j] == x
@@ -211,15 +244,16 @@ def dedup_batch(arrs, add=True):
     """重複の文書を落とす。 戻り値: 残す文書のフラグ。 add=True なら 残した文書の鍵を P に足す"""
     global P
     wk, wd, dh = keys_of(arrs); n = len(arrs); keep = np.ones(n, bool)
-    dupdoc = isin_sorted(G, dh) | isin_sorted(P, dh); u, first = np.unique(dh, return_index=True); fo = np.full(n, True); fo[:] = False; fo[first] = True; dupdoc |= ~fo   # 同じ batch の 2 番目以降
+    dupdoc = isin_sorted(G, dh) | isin_chunks(P, dh); u, first = np.unique(dh, return_index=True); fo = np.full(n, True); fo[:] = False; fo[first] = True; dupdoc |= ~fo   # 同じ batch の 2 番目以降
     keep &= ~dupdoc
     if len(wk):
-        dw = isin_sorted(G, wk) | isin_sorted(P, wk); o = np.lexsort((wd, wk)); ks = wk[o]; ds = wd[o]; firstmask = np.ones(len(ks), bool); firstmask[1:] = ks[1:] != ks[:-1]
+        dw = isin_sorted(G, wk) | isin_chunks(P, wk); o = np.lexsort((wd, wk)); ks = wk[o]; ds = wd[o]; firstmask = np.ones(len(ks), bool); firstmask[1:] = ks[1:] != ks[:-1]
         owner = np.empty(len(wk), np.int64); gi = np.cumsum(firstmask) - 1; owner_sorted = ds[firstmask][gi]; owner[o] = owner_sorted; dw |= owner < wd
         ns = np.bincount(wd, minlength=n); nd = np.bincount(wd[dw], minlength=n); keep &= ~((ns >= 2) & (nd >= 0.5 * np.maximum(ns, 1)))
     if add:
         mk = keep[wd] if len(wk) else np.zeros(0, bool); newk = np.concatenate([dh[keep], wk[mk]]) if len(wk) else dh[keep]
-        P = np.union1d(P, newk)
+        P.append(np.unique(newk))
+        if len(P) > 40: P[:] = [np.unique(np.concatenate(P))]
     return keep
 
 
@@ -288,33 +322,76 @@ def get_gen(name):
     return GENS[name]
 
 
-def fill_round(r, quota_round, stats):
-    parts = []; ntok = 0; per = {}
-    global DEFICIT
-    names = list(QUOTA); newdef = 0.0
-    for name in names:
-        need = quota_round[name] + (DEFICIT if name == 'ja_web' else 0)
-        got = 0; g = get_gen(name); buf = []
-        while got < need and name not in EXH:
+import multiprocessing as mp
+CTX = mp.get_context('fork'); QS = {}; PROCS = {}; LASTGOT = {}
+
+
+def worker(name, q, skip):
+    """データ源ごとに 1 プロセス: 読む -> トークン化 -> キューに入れる (parent が 重複除去と 組み立て)"""
+    try:
+        g = prefetch(SRC[name]()); n = 0
+        for _ in range(skip):
+            try: next(g)
+            except StopIteration: break
+        while True:
             batch = []
             for _ in range(256):
-                try: batch.append(next(g)); NPULL[name] += 1
-                except StopIteration: EXH.add(name); break
+                try: batch.append(next(g))
+                except StopIteration: break
             if not batch: break
-            arrs = tokenize(batch)
-            arrs = [a[:200000] for a in arrs]; ok = np.array([len(a) >= 8 for a in arrs])
+            arrs = tokenize(batch); q.put((len(batch), [a[:200000] for a in arrs]))
+    except Exception as e: lg('worker %s 例外: %s' % (name, str(e)[:200]))
+    q.put(None)
+
+
+def start_workers(skip):
+    for name in QUOTA:
+        QS[name] = CTX.Queue(6); p = CTX.Process(target=worker, args=(name, QS[name], skip.get(name, 0)), daemon=True); p.start(); PROCS[name] = p; NPULL[name] = skip.get(name, 0); LASTGOT[name] = time.time()
+
+
+def fill_round(r, quota_round, stats):
+    """全データ源の キューを 順繰りに 引いて 割り当て分まで 集める (読み込みと トークン化は 別プロセスで 並列)"""
+    global DEFICIT
+    names = list(QUOTA); per = {n: 0 for n in names}; parts = {n: [] for n in names}; need = {n: quota_round[n] + (DEFICIT if n == 'ja_web' else 0) for n in names}
+    from queue import Empty
+    while True:
+        active = [n for n in names if per[n] < need[n] and n not in EXH]
+        if not active: break
+        idle = True
+        for n in active:
+            try: item = QS[n].get_nowait()
+            except Empty:
+                if time.time() - LASTGOT[n] > 900: lg('読み込みが 15 分 止まった: %s を 尽きたことにする' % n); EXH.add(n)
+                continue
+            idle = False; LASTGOT[n] = time.time()
+            if item is None: EXH.add(n); continue
+            cnt, arrs = item; NPULL[n] += cnt; ok = np.array([len(a) >= 8 for a in arrs])
             if not ok.any(): continue
-            arrs = [a for a, k in zip(arrs, ok) if k]; keep = dedup_batch(arrs); nd = int((~keep).sum()); stats['drop_' + name] = stats.get('drop_' + name, 0) + nd
+            arrs = [a for a, k in zip(arrs, ok) if k]; keep = dedup_batch(arrs); stats['drop_' + n] = stats.get('drop_' + n, 0) + int((~keep).sum())
             for a, k in zip(arrs, keep):
                 if not k: continue
-                if is_val(a, name):
-                    VAL.setdefault(name, []); VAL[name] = (VAL[name] if isinstance(VAL[name], list) else [VAL[name]]) + [a]; VALN[name] = VALN.get(name, 0) + len(a); continue
-                parts.append(a); parts.append(np.zeros(1, np.uint16)); got += len(a) + 1
-        per[name] = got; stats['tok_' + name] = stats.get('tok_' + name, 0) + got
-        if name != 'ja_web': newdef += max(0, quota_round[name] - got)
-        else: newdef += max(0, need - got)
+                if is_val(a, n):
+                    VAL.setdefault(n, []); VAL[n] = (VAL[n] if isinstance(VAL[n], list) else [VAL[n]]) + [a]; VALN[n] = VALN.get(n, 0) + len(a); continue
+                parts[n].append(a); parts[n].append(np.zeros(1, np.uint16)); per[n] += len(a) + 1
+            heartbeat(r, per)
+        if idle: time.sleep(0.05)
+    out = []; newdef = 0.0
+    for n in names:
+        out += parts[n]; stats['tok_' + n] = stats.get('tok_' + n, 0) + per[n]; newdef += max(0, need[n] - per[n])
     DEFICIT = newdef
-    return parts, per
+    return out, per
+
+
+import faulthandler
+_stack = open(WORK + '/stack.txt', 'w'); faulthandler.dump_traceback_later(300, repeat=True, file=_stack)
+HB = {'t': time.time(), 'up': time.time()}
+
+
+def heartbeat(r, per):
+    if time.time() - HB['t'] > 30:
+        HB['t'] = time.time(); lg('  分割 %d 途中: %s | 引いた文書 %s' % (r, {k: int(v / 1e6) for k, v in per.items() if v}, {k: v for k, v in NPULL.items() if v}))
+        if time.time() - HB['up'] > 600 and not TINY:
+            HB['up'] = time.time(); threading.Thread(target=hf_up, args=(LOGF, 'results/fm_build_log.txt', 3)).start()
 
 
 MKB = WORK + '/mkbwt'
@@ -340,7 +417,7 @@ def postprocess(r, tokfile, meta_extra):
         with open(xzf, 'wb') as fo: subprocess.check_call(['xz', '-1', '-T2', '-c', bwt], stdout=fo)
         m = json.load(open(meta)); m.update(meta_extra); m['bwt_xz_bytes'] = os.path.getsize(xzf); json.dump(m, open(meta, 'w'))
         lg('分割 %d: xz %.0fs, %.3f B/語' % (r, time.time() - t, m['bwt_xz_bytes'] / m['n']))
-        ok = hf_up(xzf, 'fm/shard_%02d.bwt.xz' % r) and hf_up(meta, 'fm/shard_%02d.meta.json' % r)
+        ok = hf_up_many([(xzf, 'fm/shard_%02d.bwt.xz' % r), (meta, 'fm/shard_%02d.meta.json' % r)])
         if ok:
             for f in (tokfile, bwt, xzf):
                 if not TINY or f != xzf: os.path.exists(f) and os.remove(f)
@@ -349,13 +426,13 @@ def postprocess(r, tokfile, meta_extra):
     except Exception as e: lg('分割 %d: postprocess 例外 %s' % (r, str(e)[:300]))
 
 
-def save_state(r, stats):
-    global G
+def save_state(r, stats, final=False):
     st = {'rounds_done': r + 1, 'stats': stats, 'time': time.time() - T0, 'npull': NPULL, 'deficit': DEFICIT}
-    open(WORK + '/state.json', 'w').write(json.dumps(st)); hf_up(WORK + '/state.json', 'fm/state.json')
-    for k, v in VAL.items():
-        a = np.concatenate(v) if isinstance(v, list) else v; a.astype(np.uint16).tofile(WORK + '/val_%s.bin' % k); hf_up(WORK + '/val_%s.bin' % k, 'fm/val/val_%s.bin' % k)
-    hf_up(LOGF, 'results/fm_build_log.txt')
+    open(WORK + '/state.json', 'w').write(json.dumps(st)); pairs = [(WORK + '/state.json', 'fm/state.json'), (LOGF, 'results/fm_build_log.txt')]
+    if final or (r + 1) % 6 == 0:
+        for k, v in VAL.items():
+            a = np.concatenate(v) if isinstance(v, list) else v; a.astype(np.uint16).tofile(WORK + '/val_%s.bin' % k); pairs.append((WORK + '/val_%s.bin' % k, 'fm/val/val_%s.bin' % k))
+    threading.Thread(target=hf_up_many, args=(pairs,)).start()
 
 
 def main():
@@ -370,6 +447,7 @@ def main():
                 p = hf_hub_download(REPO, 'fm/state.json', repo_type='dataset', token=TOKEN, local_dir=WORK + '/resume'); st = json.load(open(p)); SKIP = st.get('npull', {}); DEFICIT = st.get('deficit', 0.0); stats = st.get('stats', {})
                 p = hf_hub_download(REPO, 'fm/dedup_keys.npy', repo_type='dataset', token=TOKEN, local_dir=WORK + '/resume'); G = np.union1d(G, np.load(p)); lg('再開: 分割 %d まで済み, 鍵 %d, 飛ばす %s' % (st['rounds_done'], len(G), SKIP))
         except Exception as e: lg('再開の読み込み失敗 %s' % str(e)[:150])
+    start_workers(SKIP)
     for r in range(NROUND):
         if time.time() - T0 > BUDGET: lg('時間の予算を超えたので 終了'); break
         if not TINY:
@@ -378,7 +456,9 @@ def main():
                 if 'fm/shard_%02d.meta.json' % r in have: lg('分割 %d は 保存済み (飛ばす)' % r); continue
             except Exception: pass
         t = time.time(); qr = {k: v / NROUND for k, v in QUOTA.items()}
-        parts, per = fill_round(r, qr, stats); G = np.union1d(G, P) if len(P) else G; P = np.empty(0, np.uint64)
+        parts, per = fill_round(r, qr, stats); 
+        if P: G = np.union1d(G, np.unique(np.concatenate(P)))
+        P = []
         if not parts: lg('データが 尽きた'); break
         arr = np.concatenate([np.zeros(1, np.uint16)] + parts); tf = '%s/s%02d.tok' % (WORK, r); arr.tofile(tf)
         lg('分割 %d: %d 語 (%.0fs) 内訳 %s 鍵 %d' % (r, len(arr), time.time() - t, {k: int(v / 1e6) for k, v in per.items()}, len(G)))
@@ -391,7 +471,13 @@ def main():
     # 最後: 重複の鍵を 保存 (再開用)
     if not TINY:
         np.save(WORK + '/dedup_keys.npy', G); hf_up(WORK + '/dedup_keys.npy', 'fm/dedup_keys.npy')
-    save_state(NROUND - 1, stats); lg('終わり')
+    save_state(NROUND - 1, stats, final=True); time.sleep(5)
+    # 保存に 失敗して 残っている 分割を もう一度 上げる
+    for f in sorted(os.listdir(WORK)):
+        if f.startswith('shard_') and f.endswith('.bwt.xz'):
+            r = int(f[6:8]); mj = '%s/s%02d.meta.json' % (WORK, r)
+            if os.path.exists(mj) and hf_up_many([(WORK + '/' + f, 'fm/' + f), (mj, 'fm/shard_%02d.meta.json' % r)]): lg('分割 %d: 再保存 済み' % r)
+    lg('終わり')
 
 
 if __name__ == '__main__':
