@@ -14,5 +14,6 @@ int main(int argc,char**argv){
   std::vector<uint16_t> bwt(n);
   for(long i=0;i<n;i++) bwt[i]= SA[i]==0 ? 0 : (uint16_t)R[SA[i]-1];
   FILE*g=fopen(argv[2],"wb"); fwrite(bwt.data(),2,n,g); fclose(g);
-  FILE*h=fopen(argv[3],"wb"); fwrite(SA.data(),4,n,h); fclose(h);
-  printf("n=%ld ok\n",n); return 0; }
+  long Z=-1; for(long i=0;i<n;i++) if(SA[i]==0){Z=i;break;}
+  FILE*h=fopen(argv[3],"w"); fprintf(h,"{\"n\": %ld, \"Z\": %ld, \"first\": %d}\n",n,Z,(int)t[0]); fclose(h);
+  printf("n=%ld Z=%ld ok\n",n,Z); return 0; }
