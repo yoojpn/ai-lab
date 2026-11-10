@@ -102,21 +102,31 @@ def f1(a, b):
     p = c / len(a); r = c / len(b); return 2 * p * r / (p + r)
 
 
-def main():
-    X, S, E, _ = build(tr, NTR); lg('学習の文字 %d (%d 問から)' % (len(X), NTR)); nh = len(X) // 5; Xh, Sh, Eh = X[-nh:], S[-nh:], E[-nh:]; Xt, St, Et = X[:-nh], S[:-nh], E[:-nh]
+def train(ntr, quiet=False):
+    X, S, E, _ = build(tr, ntr); lg('学習の文字 %d (%d 問から)' % (len(X), NTR)); nh = len(X) // 5; Xh, Sh, Eh = X[-nh:], S[-nh:], E[-nh:]; Xt, St, Et = X[:-nh], S[:-nh], E[:-nh]
     ss = search(Xt, St, Xh, Sh); lg('始まりの鍵 (上位): ' + ' | '.join('%s %.4f' % ('+'.join(FN[s] for s in sub), ll) for ll, sub in ss[:3]))
     es = search(Xt, Et, Xh, Eh); lg('終わりの鍵 (上位): ' + ' | '.join('%s %.4f' % ('+'.join(FN[s] for s in sub), ll) for ll, sub in es[:3]))
-    ms_s = fit_models(X, S, ss); ms_e = fit_models(X, E, es); em = f1s = 0.0; n = 0; ex = []
+    return fit_models(X, S, ss), fit_models(X, E, es)
+
+
+def predict(ms, ctx, q, maxlen=40):
+    ms_s, ms_e = ms; f = featurize(ctx, q); s_ = score(ms_s, f); e_ = score(ms_e, f); best = (-1e9, 0, 0)
+    for L in range(0, maxlen):
+        if L >= len(ctx): break
+        sc = s_[:len(ctx) - L] + e_[L:]; j = int(np.argmax(sc))
+        if sc[j] > best[0]: best = (sc[j], j, j + L)
+    return ctx[best[1]:best[2] + 1], float(best[0])
+
+
+def main():
+    ms = train(NTR); em = f1s = 0.0; n = 0; ex = []
     for i in range(min(NVA, len(va))):
-        r = va.iloc[i]; ctx = r['context']; f = featurize(ctx, r['question']); s_ = score(ms_s, f); e_ = score(ms_e, f); best = (-1e9, 0, 0)
-        for L in range(0, 40):
-            if L >= len(ctx): break
-            sc = s_[:len(ctx) - L] + e_[L:]; j = int(np.argmax(sc))
-            if sc[j] > best[0]: best = (sc[j], j, j + L)
-        pred = ctx[best[1]:best[2] + 1]; refs = list(r['answers']['text']); em += max(float(pred == g) for g in refs); f1s += max(f1(pred, g) for g in refs); n += 1
+        r = va.iloc[i]; ctx = r['context']; pred, _ = predict(ms, ctx, r['question'])
+        refs = list(r['answers']['text']); em += max(float(pred == g) for g in refs); f1s += max(f1(pred, g) for g in refs); n += 1
         if len(ex) < 5: ex.append((r['question'], pred, refs[0]))
     lg('JSQUAD_RESULT 学習 %d 問 / 検証 %d 問: EM %.3f  文字F1 %.3f' % (NTR, n, em / n, f1s / n))
     for q, p, g in ex: print('  問: %s | 予測: %s | 正解: %s' % (q, p, g))
 
 
-main()
+if __name__ == '__main__':
+    main()
