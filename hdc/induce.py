@@ -10,7 +10,7 @@ import engine as E
 W, WORK, S = sys.argv[1], sys.argv[2], int(sys.argv[3]); EXP = 'induce'; t0 = time.time(); V = E.VOC; log = lambda s: print('[%5.0fs] %s' % (time.time() - t0, s), flush=True)
 tok = np.fromfile(WORK + '/sub.bin', dtype=np.uint16); n_tok = len(tok) - 8; Em = np.load(WORK + '/E.npy')
 val = np.fromfile(W + '/val.bin', dtype=np.uint16); pad = np.concatenate([np.zeros(64, np.uint16), val]); pos = lambda seed, n: np.random.default_rng(seed).integers(64, len(val) - 1, n) + 64
-idx_tu, idx_te = pos(123, 1500), pos(777, 4000)
+idx_tu, idx_te = pos(123, 1200), pos(777, 4000)
 M = E.Model({n: WORK + '/final_o%d' % n for n in (1, 2, 3, 4, 5)}, smooth='wb', lam={1: 1.0, 2: 2.0, 3: 3.0, 4: 4.5, 5: 3.0}, kn_base=False)
 def dense_pa(idx):
     out = np.zeros((len(idx), V), np.float32); hi_ = np.ones(len(idx), int)
