@@ -7,7 +7,7 @@ from tokenizers import Tokenizer
 V = 32768
 W24, WD, ALP = sys.argv[1:4]
 al = pickle.load(open(ALP, 'rb')); A.D = len(al.S)
-convs = pickle.load(open('/tmp/al/convs.pkl', 'rb')); rng = np.random.default_rng(0); idx = rng.permutation(len(convs)); te = [convs[i] for i in idx[-800:]]
+convs = pickle.load(open('/tmp/al/convs.pkl', 'rb')); rng = np.random.default_rng(0); te = [convs[i] for i in np.load('/tmp/al/te_clean_idx.npy')]
 tk = Tokenizer.from_file('/tmp/tokhf/tok/tok.json'); Em = np.load(W24 + '/E.npy'); lam = np.load(W24 + '/combo_lam.npy')[:9]
 uni = np.bincount(np.fromfile(W24 + '/sub.bin', dtype=np.uint16)[8:], minlength=V).astype(float) + 1; ch = C.Chat2(None, Em, uni, lam, np.load(W24 + '/cls64.npy'), tk)
 db = C.local_dist(W24, None); dd = C.local_dist(WD, None)
