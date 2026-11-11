@@ -57,7 +57,8 @@ class QA_Engine:
                 for x in np.argsort(-P)[:topk]: C.append((lp + float(np.log(P[x] + 1e-12)), g + [int(x)]))
             H = sorted(C, key=lambda a: -(a[0] / (len(a[1]) ** norm)))[:width]
             if all(g and self.stopped(g) for _, g in H): break
-        a = TK.decode(H[0][1]); return re.split(r'[。\n]', a)[0] + ('。' if '。' in a else '')
+        a = TK.decode(H[0][1]); a = re.split(r'ですが|であるが|であり|だが|[。\n、]', a)[0].strip()   # 最初の 1 節で切る
+        return a
 
     def chat(self, hist, seed=0):
         old = self.fm.lam; self.fm.lam = [l / 0.3 for l in old]      # 対話は もとの lam
