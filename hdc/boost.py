@@ -61,6 +61,11 @@ def lsh_keys_test(Em, wts, Rm, idx):
     b = (v @ Rm > 0); h = np.zeros(len(idx), np.uint64)
     for j in range(b.shape[1]): h |= b[:, j].astype(np.uint64) << np.uint64(j)
     return h
+def chunked(func, lo, hi, CH=4_000_000):
+    """func(a, b) -> 位置 [a,b) の uint64 キー。 全体を 1 本の配列に (一時の配列は ブロックの分だけ)"""
+    out = np.empty(hi - lo, np.uint64)
+    for a in range(lo, hi, CH): b = min(a + CH, hi); out[a - lo:b - lo] = func(a, b)
+    return out
 def build_family(nm):
     out = {'te': [dict() for _ in idx_te], 'tu': [dict() for _ in idx_tu]}; hi = len(tok) - 1
     def add(keys, tests):
@@ -74,11 +79,11 @@ def build_family(nm):
         wts, T, nbits = SPECIAL[nm]; Em = get_emb(); st = len(wts) + 8
         for t in range(T):
             Rm = np.random.default_rng(1000 + t).standard_normal((Em.shape[1], nbits)).astype(np.float32)
-            keys = (lsh_keys_train(Em, wts, Rm, st, hi) << np.uint64(16)) | tok[st:hi].astype(np.uint64)
+            keys = chunked(lambda a, b: (lsh_keys_train(Em, wts, Rm, a, b) << np.uint64(16)) | tok[a:b].astype(np.uint64), st, hi)
             add(keys, [('te', idx_te, lsh_keys_test(Em, wts, Rm, idx_te)), ('tu', idx_tu, lsh_keys_test(Em, wts, Rm, idx_tu))]); del keys
     else:
         for Dtr, Dte in FAM[nm]:
-            st = max(max(Dtr), 1) + 8; keys = (keys_train(Dtr, st, hi) << np.uint64(16)) | tok[st:hi].astype(np.uint64)
+            st = max(max(Dtr), 1) + 8; keys = chunked(lambda a, b: (keys_train(Dtr, a, b) << np.uint64(16)) | tok[a:b].astype(np.uint64), st, hi)
             add(keys, [('te', idx_te, keys_test(Dte, idx_te)), ('tu', idx_tu, keys_test(Dte, idx_tu))]); del keys
     return out
 CAND = {}; old_cp = WORK + '/cands.pkl'; OLD = pickle.load(open(old_cp, 'rb')) if os.path.exists(old_cp) else {}

@@ -21,7 +21,7 @@ sh('pip -q install transformers torch')
 import torch
 from tokenizers import Tokenizer
 from transformers import AutoTokenizer, AutoModelForCausalLM
-torch.set_num_threads(8); OT = Tokenizer.from_file(W + '/tok.json'); Z = np.load(mp)
+torch.set_num_threads(8); OT = Tokenizer.from_file(W + '/tok/tok.json'); Z = np.load(mp)
 DOMS = sorted({k.rsplit('_', 1)[0] for k in Z.files if k.endswith('_tok')})
 MODELS = {'gpt2': ['en_edu', 'en_wiki', 'code'], 'HuggingFaceTB/SmolLM2-135M': ['en_edu', 'en_wiki', 'code'], 'Qwen/Qwen2.5-0.5B': ['ja_web', 'ja_wiki', 'en_edu', 'en_wiki', 'code']}
 OUT = {}
