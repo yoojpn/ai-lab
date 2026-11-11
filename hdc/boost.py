@@ -37,23 +37,58 @@ for L in (6, 8):
 FAM['del8'] = [(set(range(1, 9)), set(range(1, 10)) - {j}) for j in range(1, 10)]
 FAM['ins8'] = [(set(range(1, 10)) - {j}, set(range(1, 9))) for j in range(1, 10)]
 for L in (6, 8, 12, 16): FAM['ex%d' % L] = [(set(range(1, L + 1)), set(range(1, L + 1)))]
-NAMES = list(FAM); TOPK = 20
-cp = WORK + '/cands.pkl'
-if os.path.exists(cp): CAND = pickle.load(open(cp, 'rb'))
-else:
-    CAND = {nm: {'te': [dict() for _ in idx_te], 'tu': [dict() for _ in idx_tu]} for nm in NAMES}
-    lo, hi = 12, len(tok) - 1                                   # 先頭に余白
-    for nm in NAMES:
+SPECIAL = {'lshA': ([1.0, 0.7, 0.5], 8, 14), 'lshB': ([1.0, 0.8, 0.6, 0.5, 0.4, 0.3], 8, 14)}   # 重み (近い語ほど大), 表の数, ビット数
+NAMES = list(FAM) + list(SPECIAL); TOPK = 20
+def get_emb(dim=48):
+    """隣り合う語の PMI の SVD で 語の埋め込み (数え上げ + 線形代数のみ)"""
+    ep = WORK + '/E.npy'
+    if os.path.exists(ep): return np.load(ep)
+    import scipy.sparse as sp, scipy.sparse.linalg as sl
+    x = tok[8:].astype(np.int64); V = E.VOC; key = x[:-1] * V + x[1:]; u, cnt = np.unique(key, return_counts=True); del key
+    Mx = sp.coo_matrix((cnt.astype(np.float64), (u // V, u % V)), shape=(V, V)).tocsr(); tot = Mx.sum(); rm = np.asarray(Mx.sum(1)).ravel() + 1e-9; cm = np.asarray(Mx.sum(0)).ravel() ** 0.75 + 1e-9; cm = cm / cm.sum() * tot
+    Mx = Mx.tocoo(); pm = np.log(Mx.data * tot / (rm[Mx.row] * cm[Mx.col])); keep = pm > 0
+    Pm = sp.coo_matrix((pm[keep], (Mx.row[keep], Mx.col[keep])), shape=(V, V)).tocsr(); U, sg, _ = sl.svds(Pm, k=dim); Em = U * np.sqrt(sg)[None]; Em /= np.linalg.norm(Em, axis=1, keepdims=True) + 1e-9
+    Em = Em.astype(np.float32); np.save(ep, Em); return Em
+def lsh_keys_train(Em, wts, Rm, lo, hi):
+    v = np.zeros((hi - lo, Em.shape[1]), np.float32)
+    for k, wk in enumerate(wts, 1): v += wk * Em[tok[lo - k:hi - k]]
+    b = (v @ Rm > 0); h = np.zeros(hi - lo, np.uint64)
+    for j in range(b.shape[1]): h |= b[:, j].astype(np.uint64) << np.uint64(j)
+    return h
+def lsh_keys_test(Em, wts, Rm, idx):
+    v = np.zeros((len(idx), Em.shape[1]), np.float32)
+    for k, wk in enumerate(wts, 1): v += wk * Em[pad[idx - k]]
+    b = (v @ Rm > 0); h = np.zeros(len(idx), np.uint64)
+    for j in range(b.shape[1]): h |= b[:, j].astype(np.uint64) << np.uint64(j)
+    return h
+def build_family(nm):
+    out = {'te': [dict() for _ in idx_te], 'tu': [dict() for _ in idx_tu]}; hi = len(tok) - 1
+    def add(keys, tests):
+        keys.sort()
+        for part, idx, h in tests:
+            a_ = np.searchsorted(keys, h << np.uint64(16)); b_ = np.searchsorted(keys, (h + np.uint64(1)) << np.uint64(16))
+            for p in np.flatnonzero(b_ > a_):
+                ws, cs = np.unique((keys[a_[p]:b_[p]] & np.uint64(0xFFFF)).astype(np.int64), return_counts=True); d = out[part][p]
+                for w, c in zip(ws, cs): d[int(w)] = d.get(int(w), 0) + int(c)
+    if nm in SPECIAL:
+        wts, T, nbits = SPECIAL[nm]; Em = get_emb(); st = len(wts) + 8
+        for t in range(T):
+            Rm = np.random.default_rng(1000 + t).standard_normal((Em.shape[1], nbits)).astype(np.float32)
+            keys = (lsh_keys_train(Em, wts, Rm, st, hi) << np.uint64(16)) | tok[st:hi].astype(np.uint64)
+            add(keys, [('te', idx_te, lsh_keys_test(Em, wts, Rm, idx_te)), ('tu', idx_tu, lsh_keys_test(Em, wts, Rm, idx_tu))]); del keys
+    else:
         for Dtr, Dte in FAM[nm]:
-            st = max(max(Dtr), 1) + 8; keys = (keys_train(Dtr, st, hi) << np.uint64(16)) | tok[st:hi].astype(np.uint64); keys.sort()
-            for part, idx in (('te', idx_te), ('tu', idx_tu)):
-                h = keys_test(Dte, idx); a = np.searchsorted(keys, h << np.uint64(16)); b = np.searchsorted(keys, (h + np.uint64(1)) << np.uint64(16))
-                for p in np.flatnonzero(b > a):
-                    ws, cs = np.unique((keys[a[p]:b[p]] & np.uint64(0xFFFF)).astype(np.int64), return_counts=True); d = CAND[nm][part][p]
-                    for w, c in zip(ws, cs): d[int(w)] = d.get(int(w), 0) + int(c)
-            del keys
-        log('特徴 %s 完了 (候補のある位置: te %.1f%%)' % (nm, 100 * sum(1 for d in CAND[nm]['te'] if d) / len(idx_te)))
-    pickle.dump(CAND, open(cp, 'wb'))
+            st = max(max(Dtr), 1) + 8; keys = (keys_train(Dtr, st, hi) << np.uint64(16)) | tok[st:hi].astype(np.uint64)
+            add(keys, [('te', idx_te, keys_test(Dte, idx_te)), ('tu', idx_tu, keys_test(Dte, idx_tu))]); del keys
+    return out
+CAND = {}; old_cp = WORK + '/cands.pkl'; OLD = pickle.load(open(old_cp, 'rb')) if os.path.exists(old_cp) else {}
+for nm in NAMES:
+    fp = WORK + '/cand_%s.pkl' % nm
+    if nm in OLD: CAND[nm] = OLD[nm]
+    elif os.path.exists(fp): CAND[nm] = pickle.load(open(fp, 'rb'))
+    else: CAND[nm] = build_family(nm); pickle.dump(CAND[nm], open(fp, 'wb'))
+    log('特徴 %s 完了 (候補のある位置: te %.1f%%)' % (nm, 100 * sum(1 for d in CAND[nm]['te'] if d) / len(idx_te)))
+del OLD
 def prep(part, idx):
     lp, hi = M.logprob_at(pad, idx, return_hi=True); P = np.exp2(lp); owner = []; ws = []; F = []; seen = {}
     for p in range(len(idx)):
