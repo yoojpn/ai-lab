@@ -84,7 +84,7 @@ CANDS = list(dict.fromkeys(CANDS)); LRS = {}
 for ci, (tn, Kt, Kc) in enumerate(CANDS):
     fp = WORK + '/ind_%s_%d_%d.npz' % (tn, Kt, Kc)
     if os.path.exists(fp): z = np.load(fp); LRS[(tn, Kt, Kc)] = (z['tu'], z['te']); continue
-    ct = get_cls(Kt); OH = sp.csr_matrix((np.ones(V), (np.arange(V), ct.astype(np.int64))), shape=(V, Kt)); chain = TEMPL[tn](5 if Kt < 1024 else 4)  # Kt が大きいほど 浅く; d = {}
+    ct = get_cls(Kt); OH = sp.csr_matrix((np.ones(V), (np.arange(V), ct.astype(np.int64))), shape=(V, Kt)); chain = TEMPL[tn](5 if Kt < 1024 else 4); d = {}
     for nm, P, idx in (('tu', Pt, idx_tu), ('te', Pe, idx_te)):
         Q = np.asarray(P @ OH); Pc, fd = class_dist(idx, Kt, Kc, chain, 100000 * (ci + 1)); d[nm] = (np.log(np.maximum(Pc, 1e-30)) - np.log(np.maximum(Q, 1e-30))).astype(np.float32)
     np.savez(fp, tu=d['tu'], te=d['te']); LRS[(tn, Kt, Kc)] = (d['tu'], d['te']); log('候補 %d/%d %s Kt=%d Kc=%d 作成' % (ci + 1, len(CANDS), tn, Kt, Kc))
