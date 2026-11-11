@@ -43,9 +43,11 @@ def P(*a):
 SRC = ['dlg_se', 'dlg_izumi', 'dlg_rpc_test', 'dlg_ja_oasst', 'dlg_oasst1']; rng = np.random.default_rng(0); pos = []; docs = {}
 for sname in SRC:
     p = hf_hub_download(R, 'fm/val/val_%s.bin' % sname, repo_type='dataset', token=TK, local_dir=W + '/valx'); T = np.fromfile(p, dtype=np.uint16).astype(np.int64)
-    cuts = np.where(T == 0)[0]; ds = []
-    for i in range(len(cuts)):
-        S = T[cuts[i]:(cuts[i + 1] if i + 1 < len(cuts) else len(T))][:1200]
+    ends = np.where(T == 2)[0] + 1; ds = []; i = 0
+    while i < len(ends) - 1:
+        j = i + 1
+        while j < len(ends) - 1 and ends[j] - (ends[i - 1] if i > 0 else 0) < 350: j += 1
+        a0 = ends[i - 1] if i > 0 else 0; S = np.concatenate([[0], T[a0:ends[j]]])[:1200]; i = j + 1
         if len(S) < 40: continue
         starts = [1] + [int(x) + 1 for x in np.where(S[:-1] == 2)[0]]; ds.append((S, [x for x in starts if x < len(S)]))
     docs[sname] = ds; pp = []

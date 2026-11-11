@@ -14,8 +14,9 @@ class Chat3(Chat2):
         Fa, _ = self.al.feature(c, hist_end); f[1] = np.log1p(Fa)
         f[2] = np.clip(np.log(np.maximum(self.dd(list(ctx)), 1e-12)) - np.log(np.maximum(P, 1e-12)), -8, 8); return f
 
-    def dist3(self, ctx, hist_end, w=None):
+    def dist3(self, ctx, hist_end, w=None, late=True):
         P = self.dist(ctx).astype(np.float64); f = self.feats(ctx, hist_end, P); w = self.w if w is None else w
+        if len(w) == 6: w = w[3:] if late else w[:3]
         s = sum(w[i] * f[i] for i in range(3)); e = P * np.exp(s - s.max()); return e / e.sum()
 
     def reply3(self, utts, temp=0.7, topk=40, maxlen=80, seed=0, plain=False):
@@ -24,7 +25,7 @@ class Chat3(Chat2):
         h0 = len(ctx); gen = []
         for step in range(maxlen):
             full = ctx + gen
-            P = np.asarray(self.dist(full) if plain else self.dist3(full, h0), np.float64).copy(); P[0] = 0
+            P = np.asarray(self.dist(full) if plain else self.dist3(full, h0, late=step >= 8), np.float64).copy(); P[0] = 0
             if step < 2: P[2] = 0
             for i in range(len(gen) - 2):
                 if gen[i:i + 2] == gen[-2:]: P[gen[i + 2]] = 0
