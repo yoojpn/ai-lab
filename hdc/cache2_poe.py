@@ -10,7 +10,7 @@ W, WORK, S = sys.argv[1], sys.argv[2], int(sys.argv[3]); t0 = time.time(); V = E
 tok = np.fromfile(WORK + '/sub.bin', dtype=np.uint16); n_tok = len(tok) - 8
 val = np.fromfile(W + '/val.bin', dtype=np.uint16); pad = np.concatenate([np.zeros(64, np.uint16), val]); docs = np.load(W + '/val_docs.npy') + 64
 pos = lambda seed, n: np.random.default_rng(seed).integers(64, len(val) - 1, n) + 64
-idx_tu, idx_te = pos(123, 1500), pos(777, 4000)
+idx_tu, idx_te = pos(123, 1200), pos(777, 4000)
 M = E.Model({n: WORK + '/final_o%d' % n for n in (1, 2, 3, 4, 5)}, smooth='wb', lam={1: 1.0, 2: 2.0, 3: 3.0, 4: 4.5, 5: 3.0}, kn_base=False)
 def dense_pa(idx):
     out = np.zeros((len(idx), V), np.float32); hi_ = np.ones(len(idx), int)
@@ -68,5 +68,8 @@ for sweep in range(2):
                 if best is None or v < best[0] - 1e-9: best = (v, g)
             LAM[f, b] = best[1]
     log('掃引 %d: tune %.4f' % (sweep + 1, best[0]))
-del Ft; Fe = all_feats(idx_te); be = bits(Pe, Fe, tr_e, LAM)
+del Ft; tot = 0.0
+for c0 in range(0, len(idx_te), 400):
+    sl = slice(c0, min(c0 + 400, len(idx_te))); Fc = all_feats(idx_te[sl]); tot += bits(Pe[sl], Fc, tr_e[sl], LAM) * (sl.stop - sl.start); del Fc
+be = tot / len(idx_te)
 print('RESULT 文書のキャッシュを 対数で足す: test %.4f -> %.4f bit/語 (得 %.4f = %.2f%%)  重み (行=遠い/近い/指数/意味(遠)/意味(近), 列=頻度の段 低->高) %s' % (base_e, be, base_e - be, 100 * (base_e - be) / base_e, np.round(LAM, 2).tolist()), flush=True)
