@@ -22,7 +22,7 @@ D = {}
 rng = np.random.default_rng(0)
 for dn in DOMS:
     v = np.fromfile(hf_hub_download(R, 'fm/val/val_%s.bin' % dn, repo_type='dataset', token=TK, local_dir=W), dtype=np.uint16).astype(np.int32)
-    z = np.flatnonzero(v == 0); st = np.r_[0, z + 1]; en = np.r_[z, len(v)]; ok = np.flatnonzero(en - st >= 200); rng.shuffle(ok); ok = np.sort(ok[:NDOC])
+    z = np.flatnonzero(v == 3); st = np.r_[0, z + 1]; en = np.r_[z, len(v)]; ok = np.flatnonzero(en - st >= 200); rng.shuffle(ok); ok = np.sort(ok[:NDOC])
     docs = [v[st[i]:min(en[i], st[i] + DLEN)] for i in ok]; D[dn] = docs; lg('%s: 文書 %d, 語 %d' % (dn, len(docs), sum(len(d) for d in docs)))
 def longest(d):
     n = len(d); cand = np.zeros(n, np.int32); ml = np.zeros(n, np.int32)
@@ -64,7 +64,7 @@ from tokenizers import Tokenizer
 from transformers import AutoTokenizer, AutoModelForCausalLM
 torch.set_num_threads(8); OT = Tokenizer.from_file(W + '/tok/tok.json'); NL = 60; RES = {}
 MODELS = {'gpt2': ['en_edu', 'en_wiki', 'code'], 'HuggingFaceTB/SmolLM2-135M': ['en_edu', 'en_wiki', 'code'], 'HuggingFaceTB/SmolLM2-360M': ['en_edu', 'en_wiki', 'code'], 'rinna/japanese-gpt2-small': ['ja_web', 'ja_wiki'], 'Qwen/Qwen2.5-0.5B': DOMS}
-TXT = {dn: [OT.decode([int(x) for x in d]) for d in D[dn][:NL]] for dn in DOMS}
+TXT = {dn: [OT.decode([int(x) for x in d]) for d in D[dn][0::2]] for dn in DOMS}
 json.dump({dn: [len(t.encode('utf-8')) for t in TXT[dn]] for dn in DOMS}, open(W + '/bytes.json', 'w')); up(W + '/bytes.json', 'results/map/bytes.json')
 for mn, doms in MODELS.items():
     try:

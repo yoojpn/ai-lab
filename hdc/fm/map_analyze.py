@@ -1,6 +1,6 @@
 """100億語の索引の「誤りの地図」と 1 周目 (文書内の一致を 対数で足す)、 小型 LLM との比較。
 入力: map.npz (job_map.py が作る; 分野ごとに tok, doc, pos, cand, mlen, base[n,12,3], cq[n,12,3]) , llm.json, bytes.json
-分け方: 文書 60 以降で 調整 (lam と 重み)、 文書 0〜59 で 測る (LLM と同じ文書)。
+分け方: 文書 60 以降で 調整 (lam と 重み)、 偶数番の文書 で 測る (LLM と同じ文書)。
 使い方: python3 map_analyze.py <dir>"""
 import sys, json, numpy as np
 DIR = sys.argv[1]; Z = np.load(DIR + '/map.npz'); V = 32768; ORD = [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24]
@@ -39,7 +39,7 @@ def table(title, keys, names, bits, te):
 ALL = {}
 for dn in DOMS:
     tok, doc, pos, cand, mlen = (Z[dn + '_' + k] for k in ('tok', 'doc', 'pos', 'cand', 'mlen')); base, cq = Z[dn + '_base'], Z[dn + '_cq']
-    tu = doc >= 60; te = doc < 60; lam = tune(base[tu]); P = wb(base, lam); Pc = wb(cq, lam); bits = -np.log2(np.maximum(P, 1e-12))
+    tu = doc % 2 == 1; te = doc % 2 == 0; lam = tune(base[tu]); P = wb(base, lam); Pc = wb(cq, lam); bits = -np.log2(np.maximum(P, 1e-12))
     hi = np.zeros(len(tok), int)                       # 文脈が見つかった 最高の次数 (の番号)
     for oi in range(len(ORD)): hi[base[:, oi, 0] > 0] = oi
     hit_hi = base[np.arange(len(tok)), hi, 2] > 0     # その次数で 正解の語が 続きにあったか
@@ -49,7 +49,7 @@ for dn in DOMS:
         seen[i] = tok[i] in last; last[int(tok[i])] = 1
     chit = (cand == tok) & (mlen > 0)
     uni = base[:, 0, 2] / np.maximum(base[:, 0, 0], 1); fb = np.digitize(uni, [1e-7, 1e-6, 1e-5, 1e-4, 1e-3])
-    print('\n===== %s: 索引のみ %.4f bit/語 (文書 0〜59, %d 位置; 調整は 文書 60〜) lam=%s' % (dn, bits[te].mean(), te.sum(), lam))
+    print('\n===== %s: 索引のみ %.4f bit/語 (偶数番の文書, %d 位置; 調整は 奇数番の文書) lam=%s' % (dn, bits[te].mean(), te.sum(), lam))
     hb = np.minimum(np.searchsorted([2, 3, 4, 5, 6, 9, 13, 25], np.array(ORD)[hi], side='right'), 7)
     table('文脈が見つかった最高次数', hb, ['1 (文脈なし)', '2', '3', '4', '5', '6〜8', '10〜12', '16〜24'], bits, te)
     table('その次数で 正解が続きにあったか', hit_hi.astype(int), ['無かった', 'あった'], bits, te)
@@ -75,7 +75,7 @@ for dn in DOMS:
     r = dict(index=float(bits[te].mean()), switch=float(ba[te].mean()), loglin=float(bb[te].mean()))
     if dn in BY:
         nb = sum(BY[dn]); r['bytes_per_tok'] = nb / te.sum()
-        line = '  bit/byte (同じ 60 文書): 索引 %.4f, 索引+1周目 %.4f' % (bits[te].sum() / nb, bb[te].sum() / nb); r['index_bpb'] = float(bits[te].sum() / nb); r['round1_bpb'] = float(bb[te].sum() / nb)
+        line = '  bit/byte (同じ文書): 索引 %.4f, 索引+1周目 %.4f' % (bits[te].sum() / nb, bb[te].sum() / nb); r['index_bpb'] = float(bits[te].sum() / nb); r['round1_bpb'] = float(bb[te].sum() / nb)
         for mn, d in LLM.items():
             if dn in d: line += ' | %s (%.0fM) %.4f' % (mn.split('/')[-1], d['params'] / 1e6, d[dn]['bpb']); r[mn] = d[dn]['bpb']
         print(line)
