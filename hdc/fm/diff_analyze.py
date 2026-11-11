@@ -26,6 +26,7 @@ for dn in sorted({k.split('__')[0] for k in L.files if k.endswith('__' + MN)}):
     uni = base[:, 0, 2] / np.maximum(base[:, 0, 0], 1); fb = np.digitize(uni, [1e-7, 1e-6, 1e-5, 1e-4, 1e-3]); tab('正解の語の頻度', fb, ['<1e-7', '1e-7〜', '1e-6〜', '1e-5〜', '1e-4〜', '>=1e-3'])
     txt = [OT.decode([int(t)]) for t in tok]; kind = np.array([0 if t.strip() == '' else 1 if any(c.isdigit() for c in t) else 2 if t.strip()[:1].isupper() else 3 if t.strip()[:1].isalpha() else 4 for t in txt])
     tab('語の種類', kind, ['空白', '数字を含む', '大文字で始まる', '小文字の語', 'それ以外(記号)'])
+    tab('文書内の位置', np.minimum(np.searchsorted([8, 32, 100, 300], pos, side='right'), 4), ['1〜7', '8〜31', '32〜99', '100〜299', '300〜'])
     tab('LLM の損失の大きさ', np.digitize(lb, [0.5, 1, 2, 4, 7]), ['<0.5', '0.5〜1', '1〜2', '2〜4', '4〜7', '>=7'])
     big = np.flatnonzero(ok & (d > 6)); rng = np.random.default_rng(0); print('  LLM だけが当てた例 (差 > 6 bit): %d 位置 (%.1f%%)' % (len(big), 100 * len(big) / ok.sum()))
     for i in rng.choice(big, min(12, len(big)), replace=False):
