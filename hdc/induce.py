@@ -67,7 +67,11 @@ def h2chain(m): return [[(1, 'w'), (2, 'w')] + [(k, 'c') for k in range(3, i + 1
 def skip1(m): return [[(k, 'c') for k in range(2, i + 1)] for i in range(2, m + 1)]
 def w2c(m): return [[(1, 'c'), (2, 'w')] + [(k, 'c') for k in range(3, i + 1)] for i in range(2, m + 1)]
 def h1skip(m): return [[(1, 'w')] + [(k, 'c') for k in range(3, i + 1)] for i in range(2, m + 1)]
-TEMPL = {'c': cchain, 'h1': hchain, 'h2': h2chain, 'skip1': skip1, 'w2c': w2c, 'h1skip': h1skip}
+def w3c(m): return [[(1, 'c'), (2, 'c'), (3, 'w')] + [(k, 'c') for k in range(4, i + 1)] for i in range(3, m + 1)]
+def skip2(m): return [[(k, 'c') for k in range(3, i + 1)] for i in range(3, m + 1)]
+def w2o(m): return [[(2, 'w')] + [(k, 'c') for k in range(3, i + 1)] for i in range(2, m + 1)]
+def w1w3(m): return [[(1, 'w'), (2, 'c'), (3, 'w')] + [(k, 'c') for k in range(4, i + 1)] for i in range(3, m + 1)]
+TEMPL = {'c': cchain, 'h1': hchain, 'h2': h2chain, 'skip1': skip1, 'w2c': w2c, 'h1skip': h1skip, 'w3c': w3c, 'skip2': skip2, 'w2o': w2o, 'w1w3': w1w3}
 S_tu = np.load(WORK + '/S_tu.npy')[:len(idx_tu)]; S_te = np.load(WORK + '/S_te.npy')[:len(idx_te)]
 def tbits(P, S, tr):
     out = np.zeros(len(P))
@@ -75,11 +79,12 @@ def tbits(P, S, tr):
         sl = slice(c0, c0 + 500); e = P[sl] * np.exp(S[sl] - S[sl].max(1, keepdims=True)); out[sl] = -np.log2(e[np.arange(len(e)), tr[sl]] / e.sum(1))
     return out.mean()
 b0t, b0e = tbits(Pt, S_tu, tr_t), tbits(Pe, S_te, tr_e); print('RESULT 出発点 (統合モデル): tune %.4f test %.4f' % (b0t, b0e), flush=True)
-CANDS = [(tn, Kt, Kc) for tn in TEMPL for Kt in (64, 256, 1024) for Kc in (64, 256)]; LRS = {}
+CANDS = [(tn, Kt, Kc) for tn in ('c', 'h1', 'h2', 'skip1', 'w2c', 'h1skip') for Kt in (64, 256, 1024) for Kc in (64, 256)] + [(tn, Kt, Kc) for tn in TEMPL for Kt in (1024, 4096) for Kc in (256, 1024)]
+CANDS = list(dict.fromkeys(CANDS)); LRS = {}
 for ci, (tn, Kt, Kc) in enumerate(CANDS):
     fp = WORK + '/ind_%s_%d_%d.npz' % (tn, Kt, Kc)
     if os.path.exists(fp): z = np.load(fp); LRS[(tn, Kt, Kc)] = (z['tu'], z['te']); continue
-    ct = get_cls(Kt); OH = sp.csr_matrix((np.ones(V), (np.arange(V), ct.astype(np.int64))), shape=(V, Kt)); chain = TEMPL[tn](5 if Kt < 1024 else 4); d = {}
+    ct = get_cls(Kt); OH = sp.csr_matrix((np.ones(V), (np.arange(V), ct.astype(np.int64))), shape=(V, Kt)); chain = TEMPL[tn](5 if Kt < 1024 else 4)  # Kt が大きいほど 浅く; d = {}
     for nm, P, idx in (('tu', Pt, idx_tu), ('te', Pe, idx_te)):
         Q = np.asarray(P @ OH); Pc, fd = class_dist(idx, Kt, Kc, chain, 100000 * (ci + 1)); d[nm] = (np.log(np.maximum(Pc, 1e-30)) - np.log(np.maximum(Q, 1e-30))).astype(np.float32)
     np.savez(fp, tu=d['tu'], te=d['te']); LRS[(tn, Kt, Kc)] = (d['tu'], d['te']); log('候補 %d/%d %s Kt=%d Kc=%d 作成' % (ci + 1, len(CANDS), tn, Kt, Kc))
