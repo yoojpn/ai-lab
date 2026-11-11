@@ -61,7 +61,7 @@ def lsh_keys_test(Em, wts, Rm, idx):
     b = (v @ Rm > 0); h = np.zeros(len(idx), np.uint64)
     for j in range(b.shape[1]): h |= b[:, j].astype(np.uint64) << np.uint64(j)
     return h
-def chunked(func, lo, hi, CH=4_000_000):
+def chunked(func, lo, hi, CH=1_000_000):
     """func(a, b) -> 位置 [a,b) の uint64 キー。 全体を 1 本の配列に (一時の配列は ブロックの分だけ)"""
     out = np.empty(hi - lo, np.uint64)
     for a in range(lo, hi, CH): b = min(a + CH, hi); out[a - lo:b - lo] = func(a, b)
@@ -74,6 +74,7 @@ def build_family(nm):
             a_ = np.searchsorted(keys, h << np.uint64(16)); b_ = np.searchsorted(keys, (h + np.uint64(1)) << np.uint64(16))
             for p in np.flatnonzero(b_ > a_):
                 ws, cs = np.unique((keys[a_[p]:b_[p]] & np.uint64(0xFFFF)).astype(np.int64), return_counts=True); d = out[part][p]
+                if len(ws) > 12: o = np.argsort(-cs)[:12]; ws, cs = ws[o], cs[o]
                 for w, c in zip(ws, cs): d[int(w)] = d.get(int(w), 0) + int(c)
     if nm in SPECIAL:
         wts, T, nbits = SPECIAL[nm]; Em = get_emb(); st = len(wts) + 8
