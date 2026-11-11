@@ -31,8 +31,8 @@ def is_question(q):
 
 
 class QA_Engine:
-    def __init__(self, fm, scale=0.3):
-        self.fm = fm; self.cache = {}; fm.lam = [l * scale for l in fm.lam]
+    def __init__(self, fm, scale=0.3, retriever=None):
+        self.fm = fm; self.cache = {}; fm.lam = [l * scale for l in fm.lam]; self.ret = retriever; self.rng = np.random.default_rng(0)
 
     def dist(self, ctx):
         k = tuple(int(x) for x in ctx[-23:])
@@ -65,8 +65,30 @@ class QA_Engine:
         try: return fm_chat.reply(self.fm, hist, seed=seed)
         finally: self.fm.lam = old
 
+    @staticmethod
+    def _task_like(t):
+        return t.startswith(('以下', '次の', '入力された', '下記')) or '\n' in t
+
+    def ret_fact(self, q):
+        """検索の結果のうち、 質問の主題 (「日本の首都」) を そのまま含み、 質問の形をした発話 の返事 (主題が違う似た質問 「中国の首都」 や 言い換え課題を 除く)"""
+        core = to_cloze(q).rstrip('はが')
+        for s, p in self.ret.search(q, 10):
+            t = p[1]
+            if s >= 0.5 and core in t and not self._task_like(t) and len(t) <= len(q) * 2 + 8 and (t.rstrip().endswith(('？', '?', 'か', 'か。', 'ですか', 'でしょう'))): return p[2]
+        return None
+
+    def ret_chat(self, q, minscore=0.5):
+        """雑談: rpc / oasst の 近い発話の返事 (上位と 近い点の候補から 選ぶ)"""
+        c = [(s, p) for s, p in self.ret.search(q, 12) if s >= minscore and p[0] in ('rpc', 'ja_oasst1') and not self._task_like(p[1])]
+        if not c: return None
+        top = c[0][0]; c = [x for x in c if x[0] >= top - 0.03]; return c[int(self.rng.integers(len(c)))][1][2]
+
     def ask(self, q, hist=None, seed=0):
-        return self.factual(q) if is_question(q) else self.chat((hist or []) + [q], seed)
+        if self.ret is None: return self.factual(q) if is_question(q) else self.chat((hist or []) + [q], seed)
+        if is_question(q):
+            a = self.ret_fact(q); return a if a else self.factual(q)
+        a = self.ret_chat(q) or self.ret_chat(q, 0.3) or self.ret_chat('そうなんですね', 0.5)
+        return a if a else self.chat((hist or []) + [q], seed)
 
 
 if __name__ == '__main__':
