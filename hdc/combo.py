@@ -123,7 +123,9 @@ def bits_all(P, F, nm, sl, tr, lam, lc):
     e = P[sl] * np.exp(s - s.max(1, keepdims=True)); z = e.sum(1); return -np.log2(e[np.arange(len(e)), tr[sl]] / z)
 def tune_bits(lam, lc): return bits_all(Pt, Ft, 'tu', slice(0, len(idx_tu)), tr_t, lam, lc).mean()
 grid = [0, 0.15, 0.3, 0.6, 1.0, 1.6, 2.4, 3.5, 5.0, 7.5]
-for sweep in range(2):
+SKIPFIT = os.environ.get('SKIPFIT') == '1'
+if SKIPFIT: LAM[:] = np.load(WORK + '/combo_lam.npy'); LC[:] = [0.2, 0.3]
+for sweep in range(0 if SKIPFIT else 2):
     for ei in range(len(CLE)):
         best = None
         for g in [0, 0.1, 0.2, 0.3, 0.45, 0.6]:
@@ -138,6 +140,18 @@ for sweep in range(2):
                 if best is None or v < best[0] - 1e-9: best = (v, g)
             LAM[f, b] = best[1]
     log('掃引 %d: tune %.4f  クラスの重み %s' % (sweep + 1, best[0], LC.tolist())); np.save(WORK + '/combo_lam.npy', LAM)
+def score_mat(F, nm, sl, lam, lc):
+    s = np.zeros((sl.stop - sl.start, V), np.float32)
+    for f in range(NF): s += F[f] * lam[f][NB4[FB]][None, :]
+    for ei, (ct, d) in enumerate(CLD):
+        if lc[ei]: s += lc[ei] * d[nm][sl][:, ct]
+    return s
+if SKIPFIT:
+    np.save(WORK + '/S_tu.npy', score_mat(Ft, 'tu', slice(0, len(idx_tu)), LAM, LC)); log('調整位置のスコア行列を保存')
+    S_te = np.zeros((len(idx_te), V), np.float32)
+    for c0 in range(0, len(idx_te), 400):
+        sl = slice(c0, min(c0 + 400, len(idx_te))); Fc = all_feats(idx_te[sl]); S_te[sl] = score_mat(Fc, 'te', sl, LAM, LC); del Fc
+    np.save(WORK + '/S_te.npy', S_te); log('テストのスコア行列を保存'); sys.exit(0)
 del Ft; out = np.zeros(len(idx_te)); out0 = -np.log2(Pe[np.arange(len(idx_te)), tr_e])
 for c0 in range(0, len(idx_te), 400):
     sl = slice(c0, min(c0 + 400, len(idx_te))); Fc = all_feats(idx_te[sl]); out[sl] = bits_all(Pe, Fc, 'te', sl, tr_e, LAM, LC); del Fc
