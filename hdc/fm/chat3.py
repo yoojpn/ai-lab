@@ -7,7 +7,7 @@ from chat2 import Chat2, V
 
 class Chat3(Chat2):
     def __init__(self, dist, Em, uni, lam, CL64, tk, al, ddist, w=(0.5, 1.0, 0.75)):
-        super().__init__(dist, Em, uni, lam, CL64, tk); self.al, self.dd, self.w = al, ddist, list(w); self.absf = True
+        super().__init__(dist, Em, uni, lam, CL64, tk); self.al, self.dd, self.w = al, ddist, list(w); self.absf = True; self.mix = False; self.gscale = 0.7
 
     def feats(self, ctx, hist_end, P):
         c = np.asarray(ctx, np.int64); f = np.zeros((3, V), np.float32); f[0] = self.score(ctx)
@@ -22,13 +22,29 @@ class Chat3(Chat2):
         if len(w) == 6: w = w[3:] if late else w[:3]
         s = sum(w[i] * f[i] for i in range(3)); e = P * np.exp(s - s.max()); return e / e.sum()
 
+    GCONF = [(-1, 0.035), (0, 0.1), (2, 0.25), (4, 0.22), (6, 0.65)]   # 確信度 log ΣexpSc の 区画 -> 当たった 割合 (job_mix で 数えた)
+
+    def dist_mix(self, ctx, hist_end, q0, w=(0.2, 0.0, 0.1)):
+        """混合: P' = (1-g) P_poe + g P_copy。 コピー元は 直前の質問文 (q0 以降) を 除く。 g は 確信度の 区画ごとの 数えた 割合"""
+        P = self.dist(ctx).astype(np.float64); c = np.asarray(ctx, np.int64)
+        j, sc = self.al.cand_scores(c, hist_end); m = j < q0
+        if m.sum() == 0: return P
+        Fp = np.zeros(V); np.add.at(Fp, c[j[m]], np.exp(sc[m])); tot = Fp.sum()
+        if tot <= 0: return P
+        cf = np.log(tot); g = self.GCONF[0][1]
+        for th, v in self.GCONF: g = v if cf >= th else g
+        if cf < -1: g = self.GCONF[0][1]
+        g = min(g * self.gscale / 0.7 * 0.7, 0.95)
+        f = self.feats(ctx, hist_end, P); s = w[0] * f[0] + w[2] * f[2]; e = P * np.exp(s - s.max()); e /= e.sum()
+        return (1 - g) * e + g * Fp / tot
+
     def reply3(self, utts, temp=0.7, topk=40, maxlen=80, seed=0, plain=False):
         rng = np.random.default_rng(seed); ctx = [0]
         for u in utts: ctx += self.tk.encode(u).ids + [2]
-        h0 = len(ctx); gen = []
+        h0 = len(ctx); gen = []; q0 = h0 - len(self.tk.encode(utts[-1]).ids) - 1
         for step in range(maxlen):
             full = ctx + gen
-            P = np.asarray(self.dist(full) if plain else self.dist3(full, h0, late=step >= 8), np.float64).copy(); P[0] = 0
+            P = np.asarray(self.dist(full) if plain else (self.dist_mix(full, h0, q0) if self.mix else self.dist3(full, h0, late=step >= 8)), np.float64).copy(); P[0] = 0
             if step < 2: P[2] = 0
             for i in range(len(gen) - 2):
                 if gen[i:i + 2] == gen[-2:]: P[gen[i + 2]] = 0
