@@ -92,8 +92,19 @@ while _t.time() < t_end:
     except Exception as e:
         _t.sleep(15); continue
     if req['id'] in done: _t.sleep(10); continue
-    try: res = respond(req['utts'])
+    try:
+        if req.get('mode') == 'raw':
+            res = {'raw': []}
+            for pr in req['prompts']:
+                ids = [0] + tk.encode(pr).ids; o = {}
+                for nm, fn in (('plain', lambda c: fm.dist(c)), ('feat', lambda c: ch.dist3(c, len(ids), w=[0.5, 2.0, 0.0], late=True))):
+                    g = []
+                    for _ in range(int(req.get('n', 8))):
+                        p = np.asarray(fn(ids + g), np.float64); p[0] = 0; x = int(np.argmax(p)); g.append(x)
+                    o[nm] = tk.decode(g)
+                res['raw'].append(o)
+        else: res = respond(req['utts'])
     except Exception as e: res = {'error': str(e)[:300]}
-    res['id'] = req['id']; res['utts'] = req['utts']; done.add(req['id'])
+    res['id'] = req['id']; res['utts'] = req.get('utts'); done.add(req['id'])
     open(W + '/talk/out.json', 'w').write(json.dumps(res, ensure_ascii=False)); api.upload_file(path_or_fileobj=W + '/talk/out.json', path_in_repo='talk/out_%s.json' % req['id'], repo_id=R, repo_type='dataset')
 print('TALK_DONE', flush=True)
