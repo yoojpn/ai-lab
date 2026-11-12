@@ -7,11 +7,14 @@ from chat2 import Chat2, V
 
 class Chat3(Chat2):
     def __init__(self, dist, Em, uni, lam, CL64, tk, al, ddist, w=(0.5, 1.0, 0.75)):
-        super().__init__(dist, Em, uni, lam, CL64, tk); self.al, self.dd, self.w = al, ddist, list(w)
+        super().__init__(dist, Em, uni, lam, CL64, tk); self.al, self.dd, self.w = al, ddist, list(w); self.absf = True
 
     def feats(self, ctx, hist_end, P):
         c = np.asarray(ctx, np.int64); f = np.zeros((3, V), np.float32); f[0] = self.score(ctx)
-        Fa, _ = self.al.feature(c, hist_end); f[1] = np.log1p(Fa)
+        if self.absf:
+            j, sc = self.al.cand_scores(c, hist_end); Fa = np.zeros(V); np.add.at(Fa, c[j], np.exp(sc)); f[1] = np.log1p(Fa)
+        else:
+            Fa, _ = self.al.feature(c, hist_end); f[1] = np.log1p(Fa)
         f[2] = np.clip(np.log(np.maximum(self.dd(list(ctx)), 1e-12)) - np.log(np.maximum(P, 1e-12)), -8, 8); return f
 
     def dist3(self, ctx, hist_end, w=None, late=True):

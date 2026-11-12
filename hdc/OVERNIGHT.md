@@ -68,3 +68,9 @@
 - 会話サーバー (job_talk: Colab + HF 経由で 質問を 受ける) を 立て、 文脈内学習 (ICL) の 検査 220 問 (icl_tasks.json) を 測定 (10B 索引): 素の 索引 kv 0/60, plural 0/30, add 4/60, seq 0/40, copy_up 0/30。 特徴あり (正規化 版) は 全部 0 (改行を 出す)。 原因: align の F を 最大値で 正規化 していて 確信度が 落ちる。 24M で 確信度そのまま (log1p Σexp(sc)) に すると kv 0/20 → 8/20 (align 1.0) → 15/20 (doc 0.3 + align 1.0)。 plural/add/seq/copy_up は 0。 → 規則を 取る 仕組み (類推オフセット: E[x] + 平均(E[y_i]-E[x_i])) を 試す (emb_local.py = 局所窓 PPMI SVD)。
 - 類推オフセット (局所窓 PPMI SVD 埋め込み: E[x] + 平均(E[y_i]-E[x_i])) を ICL 検査に 足す: plural 0/10 のまま。 診断: BPE で 語が 複数の 部品に 割れる (vessels は 1 語 だが cactus→ c|act|uss) ため 語の 類推が 部品の 並びに ならない / 区切り語 (->) の 前の 語が 空白の 部品で x を 取り違える。 1 語に なる 語 (vessels 11 位, stones 46 位, islands 108 位) は 近くまで 来る。 規則の 帰納は 語の 単位 (文字・語) の 表現が 要り、 部品 (BPE) の 数え上げ では 届かない。
 - 規模の 診断 (results/fm_eval.txt と diff_log.txt, 10B 索引 vs 小さな LLM, bit/token (別の 分割に 注意)): code 索引 3.37 vs SmolLM2-135M 1.84 / Qwen2.5-0.5B 1.51 / GPT-2 4.03; en_edu 5.92 vs 4.28 (GPT-2) / 3.62 (SmolLM2) / 3.48 (Qwen); en_wiki 5.54 vs 4.59 / 4.07 / 3.77; ja_web 4.14 vs 3.87 (Qwen0.5B); ja_wiki 3.85 vs 3.51。 → 100 億語の 索引は 日本語で 0.5B の LLM に 0.3 bit 差、 英語は 2 bit 以上、 コードは 2 倍 の 差。 フロンティアは さらに 上。
+
+## 絶対確信度コピー特徴 (dlg_poe3c) と 会話サーバ での 実会話
+- 24M 清潔な 対話 bit: 絶対確信度 align 特徴 は 旧特徴と 同等 (5.698 vs 5.69, 重み [0.5,0.2,1.0,0.2])。 bit では 差が 出ない。
+- chat3 に absf=True を 追加 (align 特徴 = log1p(Σexp(sc)))。 ICL の kv で 局所修正は 効く (15/20) が plural/add/seq/copy_up は 0。
+- 10B 索引での 実会話 (converse.py, 6 台本): 全て 破綻。 無関係・言語混在・コード片混入・多ターン一貫性なし・名前想起なし。 「日本の首都」→「東京ですが、アメリカ合衆国の首都ワシントン…」 のみ 部分的に 事実に 触れる。
+- 結論: 会話可能には 程遠い。 job_final2 (JA+EN 名前想起, ICL) を 実行中。
